@@ -1,10 +1,9 @@
-import pytest
-
-from localscribe.skeleton import fib, main
+from localscribe.skeleton import main
 
 __author__ = "danibene"
 __copyright__ = "danibene"
 __license__ = "MIT"
+
 
 def test_main(capsys):
     """CLI Tests"""
