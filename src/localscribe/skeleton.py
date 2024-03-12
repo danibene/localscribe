@@ -51,7 +51,7 @@ def transcribe_audio(file_path):
     model = whisper.load_model("base")
     result = model.transcribe(file_path)
     with open("transcription.txt", "w") as f:
-        f.write(result)
+        f.write(str(result))
 
 
 # ---- CLI ----
