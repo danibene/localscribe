@@ -24,6 +24,8 @@ import argparse
 import logging
 import sys
 
+import whisper
+
 from localscribe import __version__
 
 __author__ = "danibene"
@@ -36,24 +38,14 @@ _logger = logging.getLogger(__name__)
 # ---- Python API ----
 # The functions defined in this section can be imported by users in their
 # Python scripts/interactive interpreter, e.g. via
-# `from localscribe.skeleton import fib`,
+# `from localscribe.skeleton import scribe`,
 # when using this Python module as a library.
 
-
-def fib(n):
-    """Fibonacci example function
-
-    Args:
-      n (int): integer
-
-    Returns:
-      int: n-th Fibonacci number
-    """
-    assert n > 0
-    a, b = 1, 1
-    for _i in range(n - 1):
-        a, b = b, a + b
-    return a
+def transcribe_audio(file_path):
+    model = whisper.load_model("base")
+    result = model.transcribe(file_path)
+    with open("transcription.txt", "w") as f:
+        f.write(result)
 
 
 # ---- CLI ----
@@ -78,7 +70,6 @@ def parse_args(args):
         action="version",
         version=f"localscribe {__version__}",
     )
-    parser.add_argument(dest="n", help="n-th Fibonacci number", type=int, metavar="INT")
     parser.add_argument(
         "-v",
         "--verbose",
@@ -95,6 +86,7 @@ def parse_args(args):
         action="store_const",
         const=logging.DEBUG,
     )
+    parser.add_argument("file_path", help="Path to the audio file to transcribe")
     return parser.parse_args(args)
 
 
@@ -123,7 +115,7 @@ def main(args):
     args = parse_args(args)
     setup_logging(args.loglevel)
     _logger.debug("Starting crazy calculations...")
-    print(f"The {args.n}-th Fibonacci number is {fib(args.n)}")
+    transcribe_audio(args.file_path)
     _logger.info("Script ends here")
 
 
