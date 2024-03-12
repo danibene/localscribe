@@ -25,6 +25,7 @@ import logging
 import sys
 
 import whisper
+import ssl
 
 from localscribe import __version__
 
@@ -42,6 +43,10 @@ _logger = logging.getLogger(__name__)
 # when using this Python module as a library.
 
 def transcribe_audio(file_path):
+    # From https://stackoverflow.com/a/77533595
+    # use the line from below to avoid verification of certificate
+    ssl._create_default_https_context = ssl._create_unverified_context
+
     model = whisper.load_model("base")
     result = model.transcribe(file_path)
     with open("transcription.txt", "w") as f:
