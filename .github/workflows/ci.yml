@@ -92,7 +92,13 @@ jobs:
           parallel: true
 
   pyinstaller-build:
-    runs-on: <windows-latest / ubuntu-latest / macos-latest>
+    strategy:
+      matrix:
+        platform:
+        - ubuntu-latest
+        - macos-latest
+        - windows-latest
+    runs-on: ${{ matrix.platform }}
     steps:
       - name: Create Executable
         uses: sayyid5416/pyinstaller@v1
