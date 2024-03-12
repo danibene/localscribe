@@ -91,6 +91,18 @@ jobs:
           flag-name: ${{ matrix.platform }} - py${{ matrix.python }}
           parallel: true
 
+  pyinstaller-build:
+    runs-on: <windows-latest / ubuntu-latest / macos-latest>
+    steps:
+      - name: Create Executable
+        uses: sayyid5416/pyinstaller@v1
+        with:
+          python_ver: '3.10'
+          spec: 'src/gui.py'
+          requirements: 'src/requirements.txt'
+          upload_exe_with_name: 'My executable'
+          options: --onefile, --name "My App", --windowed, 
+
   finalize:
     needs: test
     runs-on: ubuntu-latest
