@@ -107,7 +107,7 @@ jobs:
           spec: 'src/localscribe/gui.py'
           requirements: 'src/requirements.txt'
           upload_exe_with_name: 'My executable'
-          options: --onefile, --name "My App", --windowed,
+          options: --onefile, --name "My App ${{ matrix.platform }}", --windowed,
 
   finalize:
     needs: test
