@@ -22,10 +22,10 @@ References:
 
 import argparse
 import logging
+import ssl
 import sys
 
 import whisper
-import ssl
 
 from localscribe import __version__
 
@@ -41,6 +41,7 @@ _logger = logging.getLogger(__name__)
 # Python scripts/interactive interpreter, e.g. via
 # `from localscribe.skeleton import scribe`,
 # when using this Python module as a library.
+
 
 def transcribe_audio(file_path):
     # From https://stackoverflow.com/a/77533595
