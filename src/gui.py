@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import filedialog
 
-from .skeleton import transcribe_audio
+from localscribe.skeleton import transcribe_audio
 
 
 def browse_file():

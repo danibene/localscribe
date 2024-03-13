@@ -104,7 +104,7 @@ jobs:
         uses: sayyid5416/pyinstaller@v1
         with:
           python_ver: '3.10'
-          spec: 'src/localscribe/gui.py'
+          spec: 'src/gui.py'
           requirements: 'src/requirements.txt'
           upload_exe_with_name: 'My executable'
           options: --onefile, --name "My App ${{ matrix.platform }}", --windowed,
