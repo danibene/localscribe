@@ -43,6 +43,7 @@ _logger = logging.getLogger(__name__)
 # `from localscribe.skeleton import scribe`,
 # when using this Python module as a library.
 
+
 def get_model() -> Whisper:
     # From https://stackoverflow.com/a/77533595
     # use the line from below to avoid verification of certificate
@@ -50,6 +51,7 @@ def get_model() -> Whisper:
 
     model = whisper.load_model("base")
     return model
+
 
 def transcribe_audio(file_path):
     model = get_model()
