@@ -1,28 +1,3 @@
-.. todo:: THIS IS SUPPOSED TO BE AN EXAMPLE. MODIFY IT ACCORDING TO YOUR NEEDS!
-
-   The document assumes you are using a source repository service that promotes a
-   contribution model similar to `GitHub's fork and pull request workflow`_.
-   While this is true for the majority of services (like GitHub, GitLab,
-   BitBucket), it might not be the case for private repositories (e.g., when
-   using Gerrit).
-
-   Also notice that the code examples might refer to GitHub URLs or the text
-   might use GitHub specific terminology (e.g., *Pull Request* instead of *Merge
-   Request*).
-
-   Please make sure to check the document having these assumptions in mind
-   and update things accordingly.
-
-.. todo:: Provide the correct links/replacements at the bottom of the document.
-
-.. todo:: You might want to have a look on `PyScaffold's contributor's guide`_,
-
-   especially if your project is open source. The text should be very similar to
-   this template, but there are a few extra contents that you might decide to
-   also include, like mentioning labels of your issue tracker or automated
-   releases.
-
-
 ============
 Contributing
 ============
@@ -182,12 +157,29 @@ Implement your changes
 
    to record your changes in git_.
 
-   .. todo:: if you are not using pre-commit, please remove the following item:
+
+Run code checks
+---------------
 
    Please make sure to see the validation messages from |pre-commit|_ and fix
    any eventual issues.
    This should automatically use flake8_/black_ to check/fix the code style
    in a way that is compatible with the project.
+
+   To install pre-commit, run::
+
+    pip install pre-commit
+
+   To install the pre-commit hooks, run::
+
+    pre-commit install
+   
+   To run the checks manually, use::
+   
+    pre-commit run --all-files
+
+   If you can't resolve the issues, you can skip the pre-commit checks by
+   adding the ``--no-verify`` flag to your commit command.
 
    .. important:: Don't forget to add unit tests and documentation in case your
       contribution adds an additional feature and is not just a bugfix.
@@ -199,7 +191,8 @@ Implement your changes
 
       to look for recurring communication patterns.
 
-#. Please check that your changes don't break any unit tests with::
+
+#. Please check that your changes don't break any unit tests with:
 
     tox
 
@@ -217,12 +210,6 @@ Submit your contribution
 
 #. Go to the web page of your fork and click |contribute button|
    to send your changes for review.
-
-   .. todo:: if you are using GitHub, you can uncomment the following paragraph
-
-      Find more detailed information in `creating a PR`_. You might also want to open
-      the PR as a draft first and mark it as ready for review after the feedbacks
-      from the continuous integration (CI) system or any required fixes.
 
 
 Troubleshooting
