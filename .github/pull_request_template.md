@@ -17,3 +17,4 @@ Here are some things to check before creating the pull request. If you encounter
 - [ ] I have read the [CONTRIBUTING](https://github.com/danibene/localscribe/blob/main/CONTRIBUTING.rst) file.
 - [ ] The base branch of my pull request is the `dev` branch, not the `main` branch.
 - [ ] I ran the [CODE CHECKS](https://github.com/danibene/localscribe/blob/main/CONTRIBUTING.rst#implement-your-changes) on the files I added or modified and fixed the errors.
+- [ ] I updated the [CHANGELOG](https://github.com/danibene/localscribe/blob/main/CHANGELOG.rst).
