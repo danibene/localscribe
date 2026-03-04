@@ -116,27 +116,18 @@ jobs:
       - name: Install package (Unix)
         if: runner.os != 'Windows'
         run: |
-          source .venv/bin/activate
-          pip install --upgrade pip
-          pip install -e .
-          pip install -r src/requirements.txt
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e .
+          .venv/bin/pip install -r src/requirements.txt
+          .venv/bin/getwhispermodel
 
       - name: Install package (Windows)
         if: runner.os == 'Windows'
         run: |
-          .venv\Scripts\activate
-          python -m pip install --upgrade pip
-          pip install -e .
-          pip install -r src/requirements.txt
-
-      - name: Get model files
-        run: |
-          if [[ "${{ runner.os }}" != "Windows" ]]; then
-            source .venv/bin/activate
-          else
-            .venv\Scripts\activate
-          fi
-          getwhispermodel
+          .venv\Scripts\pip.exe install --upgrade pip
+          .venv\Scripts\pip.exe install -e .
+          .venv\Scripts\pip.exe install -r src/requirements.txt
+          .venv\Scripts\getwhispermodel.exe
 
       - name: Build executable
         uses: sayyid5416/pyinstaller@v1
