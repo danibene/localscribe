@@ -115,15 +115,37 @@ jobs:
 
       - name: Install package + dependencies
         run: |
-          if [ "$RUNNER_OS" != "Windows" ]; then
+          # Activate venv cross-platform
+          if [ -f ".venv/bin/activate" ]; then
             source .venv/bin/activate
           else
             .venv\Scripts\activate
           fi
+
           pip install --upgrade pip wheel setuptools
           pip install -e .
           pip install -r src/requirements.txt
           python -c "from localscribe.skeleton import download_model; download_model()"
+
+      - name: Determine whisper assets path
+        id: whisper-path
+        run: |
+          if [ -f ".venv/bin/activate" ]; then
+            source .venv/bin/activate
+          else
+            .venv\Scripts\activate
+          fi
+          WHISPER_PATH=$(python -c "import whisper, os; print(os.path.join(os.path.dirname(whisper.__file__), 'assets'))")
+          echo "WHISPER_ASSETS=$WHISPER_PATH" >> $GITHUB_ENV
+
+      - name: Set add-data separator for PyInstaller
+        id: add-data-sep
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            echo "SEP=;" >> $GITHUB_ENV
+          else
+            echo "SEP=:" >> $GITHUB_ENV
+          fi
 
       - name: Build executable
         uses: sayyid5416/pyinstaller@v1
@@ -136,7 +158,7 @@ jobs:
             --onefile
             --windowed
             --hidden-import whisper
-            --add-data ".venv/lib/python3.11/site-packages/whisper/assets/:whisper/assets/"
+            --add-data "${{ env.WHISPER_ASSETS }}${{ env.SEP }}whisper/assets"
             --clean
             --noconfirm
 
