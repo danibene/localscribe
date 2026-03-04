@@ -148,6 +148,10 @@ jobs:
         with:
           name: my-app-${{ matrix.platform }}
           path: dist/
+          python_ver: '3.11'
+          spec: 'src/gui.py'
+          requirements: 'src/requirements.txt'
+          options: --onefile, --name "My App ${{ matrix.platform }}", --windowed, --add-data ".venv/lib/python3.10/site-packages/whisper/assets/:whisper/assets/"
 
 # =========================
 # FINALIZE COVERAGE
