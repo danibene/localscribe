@@ -113,45 +113,32 @@ jobs:
       - name: Create virtual environment
         run: python -m venv .venv
 
-      # Install package + dependencies Unix
-      - name: Install package + dependencies (Unix)
-        if: runner.os != 'Windows'
+      - name: Install package + dependencies
         run: |
-          source .venv/bin/activate
-          pip install --upgrade pip wheel setuptools
-          pip install -e .
-          pip install -r src/requirements.txt
-          python -c "from localscribe.skeleton import download_model; download_model()"
-
-      # Install package + dependencies Windows
-      - name: Install package + dependencies (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          .venv\Scripts\activate
+          if [ "$RUNNER_OS" != "Windows" ]; then
+            source .venv/bin/activate
+          else
+            .venv\Scripts\activate
+          fi
           pip install --upgrade pip wheel setuptools
           pip install -e .
           pip install -r src/requirements.txt
           python -c "from localscribe.skeleton import download_model; download_model()"
 
       - name: Build executable
-        run: |
-          if [ "$RUNNER_OS" != "Windows" ]; then
-            source .venv/bin/activate
-            pyinstaller --onefile --name "My App ${{ matrix.platform }}" --windowed --hidden-import whisper src/gui.py
-          else
-            .venv\Scripts\activate
-            pyinstaller --onefile --name "My App ${{ matrix.platform }}" --windowed --hidden-import whisper src\gui.py
-          fi
-
-      - name: Upload executable
-        uses: actions/upload-artifact@v4
+        uses: sayyid5416/pyinstaller@v1
         with:
-          name: my-app-${{ matrix.platform }}
-          path: dist/
           python_ver: '3.11'
           spec: 'src/gui.py'
+          upload_exe_with_name: 'My App ${{ matrix.platform }}'
           requirements: 'src/requirements.txt'
-          options: --onefile, --name "My App ${{ matrix.platform }}", --windowed, --add-data ".venv/lib/python3.10/site-packages/whisper/assets/:whisper/assets/"
+          options: >
+            --onefile
+            --windowed
+            --hidden-import whisper
+            --add-data ".venv/lib/python3.11/site-packages/whisper/assets/:whisper/assets/"
+            --clean
+            --noconfirm
 
 # =========================
 # FINALIZE COVERAGE
