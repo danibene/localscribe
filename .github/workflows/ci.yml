@@ -113,29 +113,41 @@ jobs:
       - name: Create virtual environment
         run: python -m venv .venv
 
-      - name: Install package (Unix)
+      # Install package + dependencies Unix
+      - name: Install package + dependencies (Unix)
         if: runner.os != 'Windows'
         run: |
-          .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -e .
-          .venv/bin/pip install -r src/requirements.txt
-          .venv/bin/getwhispermodel
+          source .venv/bin/activate
+          pip install --upgrade pip wheel setuptools
+          pip install -e .
+          pip install -r src/requirements.txt
+          python -c "from localscribe.skeleton import get_model; get_model()"
 
-      - name: Install package (Windows)
+      # Install package + dependencies Windows
+      - name: Install package + dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          .venv\Scripts\pip.exe install --upgrade pip
-          .venv\Scripts\pip.exe install -e .
-          .venv\Scripts\pip.exe install -r src/requirements.txt
-          .venv\Scripts\getwhispermodel.exe
+          .venv\Scripts\activate
+          pip install --upgrade pip wheel setuptools
+          pip install -e .
+          pip install -r src/requirements.txt
+          python -c "from localscribe.skeleton import get_model; get_model()"
 
       - name: Build executable
-        uses: sayyid5416/pyinstaller@v1
+        run: |
+          if [ "$RUNNER_OS" != "Windows" ]; then
+            source .venv/bin/activate
+            pyinstaller --onefile --name "My App ${{ matrix.platform }}" --windowed --hidden-import whisper src/gui.py
+          else
+            .venv\Scripts\activate
+            pyinstaller --onefile --name "My App ${{ matrix.platform }}" --windowed --hidden-import whisper src\gui.py
+          fi
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
         with:
-          python_ver: '3.11'
-          spec: 'src/gui.py'
-          upload_exe_with_name: 'My executable ${{ matrix.platform }}'
-          options: --onefile, --name "My App ${{ matrix.platform }}", --windowed
+          name: my-app-${{ matrix.platform }}
+          path: dist/
 
 # =========================
 # FINALIZE COVERAGE
