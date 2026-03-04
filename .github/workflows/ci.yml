@@ -121,7 +121,7 @@ jobs:
           pip install --upgrade pip wheel setuptools
           pip install -e .
           pip install -r src/requirements.txt
-          python -c "from localscribe.skeleton import get_model; get_model()"
+          python -c "from localscribe.skeleton import download_model; download_model()"
 
       # Install package + dependencies Windows
       - name: Install package + dependencies (Windows)
@@ -131,7 +131,7 @@ jobs:
           pip install --upgrade pip wheel setuptools
           pip install -e .
           pip install -r src/requirements.txt
-          python -c "from localscribe.skeleton import get_model; get_model()"
+          python -c "from localscribe.skeleton import download_model; download_model()"
 
       - name: Build executable
         run: |
