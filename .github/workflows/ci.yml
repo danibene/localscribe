@@ -134,7 +134,7 @@ jobs:
         with:
           python_ver: '3.11'
           spec: 'src/gui.py'
-          upload_exe_with_name: 'My executable'
+          upload_exe_with_name: 'My executable ${{ matrix.platform }}'
           options: --onefile, --name "My App ${{ matrix.platform }}", --windowed
 
 # =========================
