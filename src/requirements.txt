@@ -1,2 +1,2 @@
 importlib_metadata==7.0.2
-openai_whisper==20231117
+openai_whisper==20250625
