@@ -1,29 +1,14 @@
 """
-This is a skeleton file that can serve as a starting point for a Python
-console script. To run this script uncomment the following lines in the
-``[options.entry_points]`` section in ``setup.cfg``::
+localscribe.skeleton
 
-    console_scripts =
-         fibonacci = localscribe.skeleton:run
-
-Then run ``pip install .`` (or ``pip install -e .`` for editable mode)
-which will install the command ``fibonacci`` inside your current environment.
-
-Besides console scripts, the header (i.e. until ``_logger``...) of this file can
-also be used as template for Python modules.
-
-Note:
-    This file can be renamed depending on your needs or safely removed if not needed.
-
-References:
-    - https://setuptools.pypa.io/en/latest/userguide/entry_point.html
-    - https://pip.pypa.io/en/stable/reference/pip_install
+Core library + CLI entry points for localscribe.
 """
 
 import argparse
 import logging
 import ssl
 import sys
+from pathlib import Path
 
 import whisper
 from whisper import Whisper
@@ -37,117 +22,144 @@ __license__ = "MIT"
 _logger = logging.getLogger(__name__)
 
 
-# ---- Python API ----
-# The functions defined in this section can be imported by users in their
-# Python scripts/interactive interpreter, e.g. via
-# `from localscribe.skeleton import scribe`,
-# when using this Python module as a library.
+# ==========================================================
+# --------------------- Library API ------------------------
+# ==========================================================
 
+def download_model(model_name: str = "base") -> None:
+    """
+    Download and cache a Whisper model locally.
 
-def get_model() -> Whisper:
-    # From https://stackoverflow.com/a/77533595
-    # use the line from below to avoid verification of certificate
+    This function is safe to call multiple times.
+    """
+    # Avoid SSL verification issues in some environments
     ssl._create_default_https_context = ssl._create_unverified_context
-
-    model = whisper.load_model("base")
-    return model
+    whisper.load_model(model_name)
 
 
-def transcribe_audio(file_path):
-    model = get_model()
+def load_model(model_name: str = "base") -> Whisper:
+    """
+    Load and return a Whisper model instance.
+    """
+    ssl._create_default_https_context = ssl._create_unverified_context
+    return whisper.load_model(model_name)
+
+
+def transcribe_audio(file_path: str, model_name: str = "base") -> dict:
+    """
+    Transcribe an audio file and return the transcription result.
+    """
+    model = load_model(model_name)
     result = model.transcribe(file_path)
-    with open("transcription.txt", "w") as f:
-        f.write(str(result))
+    return result
 
 
-# ---- CLI ----
-# The functions defined in this section are wrappers around the main Python
-# API allowing them to be called directly from the terminal as a CLI
-# executable/script.
-
+# ==========================================================
+# ----------------------- CLI Logic ------------------------
+# ==========================================================
 
 def parse_args(args):
-    """Parse command line parameters
+    parser = argparse.ArgumentParser(description="Local audio transcription using Whisper")
 
-    Args:
-      args (List[str]): command line parameters as list of strings
-          (for example  ``["--help"]``).
-
-    Returns:
-      :obj:`argparse.Namespace`: command line parameters namespace
-    """
-    parser = argparse.ArgumentParser(description="Just a Fibonacci demonstration")
     parser.add_argument(
         "--version",
         action="version",
         version=f"localscribe {__version__}",
     )
+
     parser.add_argument(
         "-v",
         "--verbose",
         dest="loglevel",
-        help="set loglevel to INFO",
         action="store_const",
         const=logging.INFO,
+        help="Set log level to INFO",
     )
+
     parser.add_argument(
         "-vv",
         "--very-verbose",
         dest="loglevel",
-        help="set loglevel to DEBUG",
         action="store_const",
         const=logging.DEBUG,
+        help="Set log level to DEBUG",
     )
-    parser.add_argument("file_path", help="Path to the audio file to transcribe")
+
+    parser.add_argument(
+        "file_path",
+        nargs="?",
+        help="Path to the audio file to transcribe",
+    )
+
     return parser.parse_args(args)
 
 
 def setup_logging(loglevel):
-    """Setup basic logging
-
-    Args:
-      loglevel (int): minimum loglevel for emitting messages
-    """
     logformat = "[%(asctime)s] %(levelname)s:%(name)s:%(message)s"
     logging.basicConfig(
-        level=loglevel, stream=sys.stdout, format=logformat, datefmt="%Y-%m-%d %H:%M:%S"
+        level=loglevel or logging.WARNING,
+        stream=sys.stdout,
+        format=logformat,
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
 
 
+# ==========================================================
+# ------------------ CLI Entry Points ----------------------
+# ==========================================================
+
+def download_model_cli():
+    """
+    Console script entry point for downloading the Whisper model.
+    Must NOT return a model object.
+    """
+    try:
+        download_model()
+        print("Whisper model downloaded successfully.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"Error downloading model: {e}")
+        sys.exit(1)
+
+
 def main(args):
-    """Wrapper allowing :func:`fib` to be called with string arguments in a CLI fashion
-
-    Instead of returning the value from :func:`fib`, it prints the result to the
-    ``stdout`` in a nicely formatted message.
-
-    Args:
-      args (List[str]): command line parameters as list of strings
-          (for example  ``["--verbose", "42"]``).
+    """
+    CLI entry for transcription.
     """
     args = parse_args(args)
     setup_logging(args.loglevel)
-    _logger.debug("Starting crazy calculations...")
-    transcribe_audio(args.file_path)
-    _logger.info("Script ends here")
+
+    if not args.file_path:
+        print("Error: You must provide an audio file path.")
+        sys.exit(1)
+
+    file_path = Path(args.file_path)
+
+    if not file_path.exists():
+        print(f"Error: File not found: {file_path}")
+        sys.exit(1)
+
+    try:
+        _logger.info("Starting transcription...")
+        result = transcribe_audio(str(file_path))
+
+        output_file = Path("transcription.txt")
+        output_file.write_text(result["text"])
+
+        print(f"Transcription saved to {output_file}")
+        sys.exit(0)
+
+    except Exception as e:
+        print(f"Transcription failed: {e}")
+        sys.exit(1)
 
 
 def run():
-    """Calls :func:`main` passing the CLI arguments extracted from :obj:`sys.argv`
-
-    This function can be used as entry point to create console scripts with setuptools.
+    """
+    Entry point for main CLI command.
     """
     main(sys.argv[1:])
 
 
 if __name__ == "__main__":
-    # ^  This is a guard statement that will prevent the following code from
-    #    being executed in the case someone imports this file instead of
-    #    executing it as a script.
-    #    https://docs.python.org/3/library/__main__.html
-
-    # After installing your project with pip, users can also run your Python
-    # modules as scripts via the ``-m`` flag, as defined in PEP 338::
-    #
-    #     python -m localscribe.skeleton 42
-    #
     run()
