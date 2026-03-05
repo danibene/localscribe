@@ -4,12 +4,12 @@ on:
   push:
     branches: [main]
     tags:
-      - 'v*'
-      - '*.*.*'
+      - "v*"
+      - "*.*.*"
   pull_request:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 1,16 * *'
+    - cron: "0 0 1,16 * *"
 
 permissions:
   contents: read
@@ -19,9 +19,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-# =========================
-# PREPARE (build package)
-# =========================
+  # =========================
+  # PREPARE (build package)
+  # =========================
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -56,15 +56,14 @@ jobs:
           path: dist/
           retention-days: 1
 
-# =========================
-# TEST MATRIX
-# =========================
+  # =========================
+  # TEST MATRIX
+  # =========================
   test:
     needs: prepare
     strategy:
       fail-fast: false
       matrix:
-        # 3.7 is EOL and no longer available on ubuntu-latest.
         python: ["3.8", "3.11"]
         platform: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.platform }}
@@ -99,9 +98,9 @@ jobs:
           flag-name: ${{ matrix.platform }} - py${{ matrix.python }}
           parallel: true
 
-# =========================
-# PYINSTALLER BUILD
-# =========================
+  # =========================
+  # PYINSTALLER BUILD (bundles model + ffmpeg)
+  # =========================
   pyinstaller-build:
     strategy:
       fail-fast: false
@@ -125,27 +124,37 @@ jobs:
         run: |
           set -euo pipefail
           source .venv/bin/activate
-          # Keep the runner disk usage under control.
-          # Installing torch from PyPI on Linux may pull large CUDA wheels (nvidia-*),
-          # which can easily exhaust the GitHub runner disk.
+
           python -m pip install --upgrade pip wheel setuptools
+
+          # Prevent Linux torch from pulling huge CUDA wheels.
           python -m pip install --no-cache-dir \
             --index-url https://download.pytorch.org/whl/cpu \
             --extra-index-url https://pypi.org/simple \
             torch==2.10.0
 
+          # Install runtime deps + tooling
           python -m pip install --no-cache-dir -e .
           python -m pip install --no-cache-dir -r src/requirements.txt
-          python -m pip install pyinstaller
+          python -m pip install --no-cache-dir pyinstaller imageio-ffmpeg
 
+          # Download Whisper model into localscribe/whisper_models
           python -c "from localscribe.skeleton import download_model; download_model()"
+
+          # Locate whisper assets and the downloaded model directory
           WHISPER_PATH=$(python -c "import whisper, os; print(os.path.join(os.path.dirname(whisper.__file__), 'assets'))")
+          MODEL_PATH=$(python -c "import pathlib, localscribe.skeleton as s; print(str(pathlib.Path(s.__file__).resolve().parent / 'whisper_models'))")
+
+          # Use platform-provided ffmpeg from imageio-ffmpeg wheel and bundle it
+          FFMPEG_EXE=$(python -c "import imageio_ffmpeg as i; print(i.get_ffmpeg_exe())")
 
           pyinstaller src/gui.py \
             --onefile \
             --windowed \
             --hidden-import whisper \
             --add-data "${WHISPER_PATH}:whisper/assets" \
+            --add-data "${MODEL_PATH}:whisper_models" \
+            --add-binary "${FFMPEG_EXE}:ffmpeg" \
             --clean \
             --noconfirm
 
@@ -166,25 +175,30 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           .\.venv\Scripts\Activate.ps1
-          # Same idea as Unix: use the CPU torch wheels to avoid huge CUDA downloads.
-          python -m pip install --upgrade pip wheel setuptools
-          python -m pip install --no-cache-dir `
-            --index-url https://download.pytorch.org/whl/cpu `
-            --extra-index-url https://pypi.org/simple `
-            torch==2.10.0
 
+          python -m pip install --upgrade pip wheel setuptools
+
+          # On Windows, torch wheels are already CPU by default unless you choose CUDA-specific builds.
           python -m pip install --no-cache-dir -e .
           python -m pip install --no-cache-dir -r src/requirements.txt
-          python -m pip install pyinstaller
+          python -m pip install --no-cache-dir pyinstaller imageio-ffmpeg
 
+          # Download Whisper model into localscribe/whisper_models
           python -c "from localscribe.skeleton import download_model; download_model()"
+
           $whisperPath = python -c "import whisper, os; print(os.path.join(os.path.dirname(whisper.__file__), 'assets'))"
+          $modelPath = python -c "import pathlib, localscribe.skeleton as s; print(str(pathlib.Path(s.__file__).resolve().parent / 'whisper_models'))"
+
+          # Bundle ffmpeg from imageio-ffmpeg
+          $ffmpegExe = python -c "import imageio_ffmpeg as i; print(i.get_ffmpeg_exe())"
 
           pyinstaller src\gui.py `
             --onefile `
             --windowed `
             --hidden-import whisper `
             --add-data "$whisperPath;whisper/assets" `
+            --add-data "$modelPath;whisper_models" `
+            --add-binary "$ffmpegExe;ffmpeg" `
             --clean `
             --noconfirm
 
@@ -195,9 +209,9 @@ jobs:
           name: localscribe-${{ runner.os }}
           path: dist/*
 
-# =========================
-# FINALIZE COVERAGE
-# =========================
+  # =========================
+  # FINALIZE COVERAGE
+  # =========================
   finalize:
     needs: test
     runs-on: ubuntu-latest
@@ -208,9 +222,9 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           parallel-finished: true
 
-# =========================
-# PUBLISH
-# =========================
+  # =========================
+  # PUBLISH
+  # =========================
   publish:
     needs: finalize
     if: ${{ github.event_name == 'push' && contains(github.ref, 'refs/tags/') }}
