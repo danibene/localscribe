@@ -26,6 +26,7 @@ _logger = logging.getLogger(__name__)
 # --------------------- Library API ------------------------
 # ==========================================================
 
+
 def download_model(model_name: str = "base") -> None:
     """
     Download and cache a Whisper model locally.
@@ -58,8 +59,11 @@ def transcribe_audio(file_path: str, model_name: str = "base") -> dict:
 # ----------------------- CLI Logic ------------------------
 # ==========================================================
 
+
 def parse_args(args):
-    parser = argparse.ArgumentParser(description="Local audio transcription using Whisper")
+    parser = argparse.ArgumentParser(
+        description="Local audio transcription using Whisper"
+    )
 
     parser.add_argument(
         "--version",
@@ -107,6 +111,7 @@ def setup_logging(loglevel):
 # ==========================================================
 # ------------------ CLI Entry Points ----------------------
 # ==========================================================
+
 
 def download_model_cli():
     """
