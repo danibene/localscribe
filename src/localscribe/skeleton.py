@@ -10,7 +10,9 @@ import argparse
 import logging
 import os
 import ssl
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -27,28 +29,18 @@ _logger = logging.getLogger(__name__)
 # ------------------------------------------------------------
 
 def _resource_root() -> Path:
-    """
-    Return the directory where bundled resources live.
-
-    In PyInstaller onefile builds this is sys._MEIPASS.
-    In normal execution we use this module directory.
-    """
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS)  # type: ignore[attr-defined]
     return Path(__file__).resolve().parent
 
 
 def _ffmpeg_candidates() -> list[Path]:
-    """
-    Candidate locations where PyInstaller might place ffmpeg.
-    """
     root = _resource_root()
     exe = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
-
     return [
-        root / "ffmpeg" / exe,  # preferred layout when we bundle to "ffmpeg/"
-        root / exe,             # sometimes ends up at the root of _MEIPASS
-        root / "bin" / exe,     # alternative layout
+        root / "ffmpeg" / exe,
+        root / exe,
+        root / "bin" / exe,
     ]
 
 
@@ -58,33 +50,27 @@ def _find_bundled_ffmpeg() -> Optional[Path]:
             if p.exists():
                 return p
         except OSError:
-            # In rare cases (permissions/encoding), treat as not found.
             continue
     return None
 
 
 def _model_root() -> Path:
-    """
-    Directory containing Whisper model weights.
-
-    We expect PyInstaller to bundle this folder as "whisper_models"
-    at runtime (_MEIPASS/whisper_models).
-    """
     return _resource_root() / "whisper_models"
 
 
-def _configure_runtime() -> None:
+def _configure_runtime() -> Path:
     """
-    Configure runtime environment for bundled execution.
-
-    - Ensure SSL context won't fail in locked-down environments
-    - Ensure bundled ffmpeg is discoverable by subprocess/Whisper
+    Configure runtime environment for bundled execution and return ffmpeg path.
     """
     ssl._create_default_https_context = ssl._create_unverified_context
 
+    # Force CPU and avoid pathological thread explosions.
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+
     ffmpeg = _find_bundled_ffmpeg()
     if ffmpeg is None:
-        # Make the failure explicit and informative.
         tried = ", ".join(str(p) for p in _ffmpeg_candidates())
         raise RuntimeError(
             "Bundled ffmpeg not found. Whisper needs ffmpeg to decode audio.\n"
@@ -95,14 +81,81 @@ def _configure_runtime() -> None:
             "  - ffmpeg.exe (resource root)\n"
         )
 
-    # Prepend directory so `ffmpeg` resolves in subprocess calls.
     ffmpeg_dir = str(ffmpeg.parent)
     current_path = os.environ.get("PATH", "")
-    if not current_path.startswith(ffmpeg_dir):
+    if ffmpeg_dir not in current_path:
         os.environ["PATH"] = ffmpeg_dir + os.pathsep + current_path
-
-    # Some libraries also honor this.
     os.environ["FFMPEG_BINARY"] = str(ffmpeg)
+
+    return ffmpeg
+
+
+# ------------------------------------------------------------
+# Audio pre-processing (avoid ffmpeg hangs inside whisper)
+# ------------------------------------------------------------
+
+def _convert_to_wav_16k_mono(
+    src: Path,
+    ffmpeg: Path,
+    timeout_s: int = 60,
+) -> Path:
+    """
+    Convert any media file to 16kHz mono WAV using ffmpeg.
+
+    Returns a path to a temporary WAV file.
+    """
+    if not src.exists():
+        raise RuntimeError(f"Input file not found: {src}")
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="localscribe_"))
+    out_wav = tmp_dir / (src.stem + ".wav")
+
+    # -vn: ignore video stream
+    # -ac 1: mono
+    # -ar 16000: 16kHz (what whisper expects)
+    # -f wav: consistent container
+    cmd = [
+        str(ffmpeg),
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(src),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-f",
+        "wav",
+        str(out_wav),
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"ffmpeg timed out after {timeout_s}s while decoding:\n{src}\n\n"
+            "This usually indicates a problematic codec/container or a hung ffmpeg process."
+        )
+
+    if proc.returncode != 0 or not out_wav.exists():
+        stderr = (proc.stderr or "").strip()
+        raise RuntimeError(
+            "ffmpeg failed to decode the input file.\n\n"
+            f"File: {src}\n"
+            f"Return code: {proc.returncode}\n"
+            f"stderr:\n{stderr or '(no stderr)'}"
+        )
+
+    return out_wav
 
 
 # ------------------------------------------------------------
@@ -110,24 +163,13 @@ def _configure_runtime() -> None:
 # ------------------------------------------------------------
 
 def download_model(model_name: str = "base") -> None:
-    """
-    Download Whisper model into the local model directory.
-
-    Safe to call multiple times.
-    """
-    # Note: download step may not need ffmpeg, but it doesn't hurt.
     ssl._create_default_https_context = ssl._create_unverified_context
-
     model_dir = _model_root()
     model_dir.mkdir(parents=True, exist_ok=True)
-
     whisper.load_model(model_name, download_root=str(model_dir))
 
 
 def load_model(model_name: str = "base") -> Whisper:
-    """
-    Load Whisper model from the bundled model directory.
-    """
     _configure_runtime()
 
     model_dir = _model_root()
@@ -135,8 +177,7 @@ def load_model(model_name: str = "base") -> Whisper:
         raise RuntimeError(
             "Whisper model directory not found.\n"
             f"Expected: {model_dir}\n"
-            "Fix: bundle the downloaded model folder into the PyInstaller build "
-            "as 'whisper_models'."
+            "Fix: bundle the downloaded model folder into the PyInstaller build as 'whisper_models'."
         )
 
     model = whisper.load_model(model_name, download_root=str(model_dir))
@@ -146,22 +187,22 @@ def load_model(model_name: str = "base") -> Whisper:
 
 
 def transcribe_audio(file_path: str, model_name: str = "base") -> dict:
-    """
-    Transcribe an audio file and return the Whisper result dict.
-    """
-    _configure_runtime()
+    ffmpeg = _configure_runtime()
 
     src = Path(file_path)
     if not src.exists():
         raise RuntimeError(f"Input file not found: {src}")
 
-    model = load_model(model_name)
-    result = model.transcribe(str(src))
+    # Convert first, with a timeout, so we don't hang forever inside whisper/audio.py
+    wav_path = _convert_to_wav_16k_mono(src, ffmpeg=ffmpeg, timeout_s=60)
 
-    if result is None:
-        raise RuntimeError("Whisper returned None for transcription result.")
-    if "text" not in result:
-        raise RuntimeError(f"Unexpected Whisper result keys: {list(result.keys())}")
+    model = load_model(model_name)
+
+    # You can optionally add: fp16=False to avoid GPU expectations
+    result = model.transcribe(str(wav_path), fp16=False)
+
+    if result is None or "text" not in result:
+        raise RuntimeError("Unexpected Whisper transcription result.")
 
     return result
 
@@ -172,14 +213,8 @@ def transcribe_audio(file_path: str, model_name: str = "base") -> dict:
 
 def parse_args(args):
     parser = argparse.ArgumentParser(description="Local Whisper transcription")
-
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"localscribe {__version__}",
-    )
-
-    parser.add_argument("file_path", nargs="?", help="Path to audio file")
+    parser.add_argument("--version", action="version", version=f"localscribe {__version__}")
+    parser.add_argument("file_path", nargs="?", help="Path to audio/video file")
     return parser.parse_args(args)
 
 
@@ -202,9 +237,8 @@ def main(args):
 
     try:
         res = transcribe_audio(ns.file_path)
-        text = res.get("text", "")
         out = Path("transcription.txt")
-        out.write_text(text, encoding="utf-8")
+        out.write_text(res.get("text", ""), encoding="utf-8")
         print(f"Saved transcription to {out}")
         sys.exit(0)
     except Exception as e:
