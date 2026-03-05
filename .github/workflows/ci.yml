@@ -125,9 +125,17 @@ jobs:
         run: |
           set -euo pipefail
           source .venv/bin/activate
+          # Keep the runner disk usage under control.
+          # Installing torch from PyPI on Linux may pull large CUDA wheels (nvidia-*),
+          # which can easily exhaust the GitHub runner disk.
           python -m pip install --upgrade pip wheel setuptools
-          python -m pip install -e .
-          python -m pip install -r src/requirements.txt
+          python -m pip install --no-cache-dir \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            torch==2.10.0
+
+          python -m pip install --no-cache-dir -e .
+          python -m pip install --no-cache-dir -r src/requirements.txt
           python -m pip install pyinstaller
 
           python -c "from localscribe.skeleton import download_model; download_model()"
@@ -158,9 +166,15 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           .\.venv\Scripts\Activate.ps1
+          # Same idea as Unix: use the CPU torch wheels to avoid huge CUDA downloads.
           python -m pip install --upgrade pip wheel setuptools
-          python -m pip install -e .
-          python -m pip install -r src/requirements.txt
+          python -m pip install --no-cache-dir `
+            --index-url https://download.pytorch.org/whl/cpu `
+            --extra-index-url https://pypi.org/simple `
+            torch==2.10.0
+
+          python -m pip install --no-cache-dir -e .
+          python -m pip install --no-cache-dir -r src/requirements.txt
           python -m pip install pyinstaller
 
           python -c "from localscribe.skeleton import download_model; download_model()"
