@@ -6,6 +6,7 @@ Core library + CLI entry points for localscribe.
 
 import argparse
 import logging
+import os
 import ssl
 import sys
 from pathlib import Path
@@ -38,6 +39,30 @@ def _model_root() -> Path:
     return _resource_root() / "whisper_models"
 
 
+def _ensure_bundled_ffmpeg_on_path() -> None:
+    """If we bundled ffmpeg into the app, ensure Whisper can find it.
+
+    Whisper calls `ffmpeg` via subprocess. In a PyInstaller onefile build,
+    we bundle an ffmpeg executable into a `ffmpeg/` folder and then prepend
+    that folder to PATH at runtime.
+    """
+    ffmpeg_dir = _resource_root() / "ffmpeg"
+    if not ffmpeg_dir.exists():
+        return
+
+    exe_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    ffmpeg_exe = ffmpeg_dir / exe_name
+    if not ffmpeg_exe.exists():
+        return
+
+    current_path = os.environ.get("PATH", "")
+    ffmpeg_dir_str = str(ffmpeg_dir)
+
+    # Prepend so it wins over any system ffmpeg.
+    if not current_path.startswith(ffmpeg_dir_str):
+        os.environ["PATH"] = ffmpeg_dir_str + os.pathsep + current_path
+
+
 # ==========================================================
 # --------------------- Library API ------------------------
 # ==========================================================
@@ -49,8 +74,11 @@ def download_model(model_name: str = "base") -> None:
 
     This function is safe to call multiple times.
     """
+    _ensure_bundled_ffmpeg_on_path()
+
     # Avoid SSL verification issues in some environments
     ssl._create_default_https_context = ssl._create_unverified_context
+
     model_dir = _model_root()
     model_dir.mkdir(parents=True, exist_ok=True)
     whisper.load_model(model_name, download_root=str(model_dir))
@@ -60,8 +88,11 @@ def load_model(model_name: str = "base") -> Whisper:
     """
     Load and return a Whisper model instance.
     """
+    _ensure_bundled_ffmpeg_on_path()
+
     ssl._create_default_https_context = ssl._create_unverified_context
     model_dir = _model_root()
+
     # In a bundled app, this directory should already contain the .pt weights.
     # If it doesn't, Whisper will try to download and may fail on restricted networks.
     return whisper.load_model(model_name, download_root=str(model_dir))
@@ -71,6 +102,7 @@ def transcribe_audio(file_path: str, model_name: str = "base") -> dict:
     """
     Transcribe an audio file and return the transcription result.
     """
+    _ensure_bundled_ffmpeg_on_path()
     model = load_model(model_name)
     result = model.transcribe(file_path)
     return result
@@ -170,7 +202,7 @@ def main(args):
         result = transcribe_audio(str(file_path))
 
         output_file = Path("transcription.txt")
-        output_file.write_text(result["text"])
+        output_file.write_text(result["text"], encoding="utf-8")
 
         print(f"Transcription saved to {output_file}")
         sys.exit(0)
