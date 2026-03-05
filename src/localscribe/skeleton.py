@@ -22,6 +22,22 @@ __license__ = "MIT"
 _logger = logging.getLogger(__name__)
 
 
+def _resource_root() -> Path:
+    """Root directory for bundled resources.
+
+    In a PyInstaller onefile build, resources are extracted under ``sys._MEIPASS``.
+    In normal Python execution, resources live alongside this module.
+    """
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    return Path(__file__).resolve().parent
+
+
+def _model_root() -> Path:
+    """Directory where Whisper model weights are expected."""
+    return _resource_root() / "whisper_models"
+
+
 # ==========================================================
 # --------------------- Library API ------------------------
 # ==========================================================
@@ -35,7 +51,9 @@ def download_model(model_name: str = "base") -> None:
     """
     # Avoid SSL verification issues in some environments
     ssl._create_default_https_context = ssl._create_unverified_context
-    whisper.load_model(model_name)
+    model_dir = _model_root()
+    model_dir.mkdir(parents=True, exist_ok=True)
+    whisper.load_model(model_name, download_root=str(model_dir))
 
 
 def load_model(model_name: str = "base") -> Whisper:
@@ -43,7 +61,10 @@ def load_model(model_name: str = "base") -> Whisper:
     Load and return a Whisper model instance.
     """
     ssl._create_default_https_context = ssl._create_unverified_context
-    return whisper.load_model(model_name)
+    model_dir = _model_root()
+    # In a bundled app, this directory should already contain the .pt weights.
+    # If it doesn't, Whisper will try to download and may fail on restricted networks.
+    return whisper.load_model(model_name, download_root=str(model_dir))
 
 
 def transcribe_audio(file_path: str, model_name: str = "base") -> dict:
