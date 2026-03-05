@@ -7,7 +7,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import Optional
 
-from localscribe.skeleton import transcribe_audio
+from localscribe.skeleton import transcribe_audio_safe
 
 
 class App(tk.Tk):
@@ -20,10 +20,13 @@ class App(tk.Tk):
         self._last_transcript: Optional[str] = None
         self._last_source_path: Optional[Path] = None
 
+        self._transcribe_start_ts: Optional[float] = None
+        self._tick_job: Optional[str] = None
+
         top = tk.Frame(self)
         top.pack(fill="x", padx=12, pady=12)
 
-        self.btn_browse = tk.Button(top, text="Select audio file…", command=self.on_browse)
+        self.btn_browse = tk.Button(top, text="Select audio/video file…", command=self.on_browse)
         self.btn_browse.pack(side="left")
 
         self.btn_save_as = tk.Button(
@@ -44,16 +47,41 @@ class App(tk.Tk):
         self.lbl_status.configure(text=status)
         self.btn_browse.configure(state="disabled" if busy else "normal")
 
+    def _start_tick(self) -> None:
+        import time
+
+        self._transcribe_start_ts = time.time()
+
+        def tick():
+            import time
+            if self._transcribe_start_ts is None:
+                return
+            elapsed = int(time.time() - self._transcribe_start_ts)
+            # keep whatever base status we had, but append elapsed
+            base = self.lbl_status.cget("text").split("  |  ")[0]
+            self.lbl_status.configure(text=f"{base}  |  {elapsed}s")
+            self._tick_job = self.after(1000, tick)
+
+        tick()
+
+    def _stop_tick(self) -> None:
+        self._transcribe_start_ts = None
+        if self._tick_job is not None:
+            try:
+                self.after_cancel(self._tick_job)
+            except Exception:
+                pass
+            self._tick_job = None
+
     def _write_debug_log(self, src: Path, text: str) -> Optional[Path]:
         try:
-            log_path = src.with_suffix(src.suffix + ".localscribe.log.txt")
+            log_path = src.with_suffix(src.suffix + ".localscribe.gui.log.txt")
             log_path.write_text(text, encoding="utf-8")
             return log_path
         except Exception:
             return None
 
     def _show_traceback_dialog(self, title: str, message: str, tb_text: str) -> None:
-        # Custom dialog with a scrollable traceback + copy button.
         win = tk.Toplevel(self)
         win.title(title)
         win.geometry("820x520")
@@ -81,18 +109,15 @@ class App(tk.Tk):
         def copy_to_clipboard() -> None:
             self.clipboard_clear()
             self.clipboard_append(tb_text)
-            self.update()  # keeps clipboard after window closes
-            messagebox.showinfo("LocalScribe", "Traceback copied to clipboard.")
+            self.update()
+            messagebox.showinfo("LocalScribe", "Copied to clipboard.")
 
-        btn_copy = tk.Button(bottom, text="Copy traceback", command=copy_to_clipboard)
-        btn_copy.pack(side="left")
-
-        btn_close = tk.Button(bottom, text="Close", command=win.destroy)
-        btn_close.pack(side="right")
+        tk.Button(bottom, text="Copy traceback", command=copy_to_clipboard).pack(side="left")
+        tk.Button(bottom, text="Close", command=win.destroy).pack(side="right")
 
     def on_browse(self) -> None:
         file_path = filedialog.askopenfilename(
-            title="Choose an audio file",
+            title="Choose an audio/video file",
             filetypes=[
                 ("Audio/Video", "*.mp3 *.wav *.m4a *.flac *.aac *.ogg *.wma *.mp4 *.mov *.mkv"),
                 ("All files", "*.*"),
@@ -110,18 +135,24 @@ class App(tk.Tk):
         self._last_transcript = None
         self._last_source_path = src
         self.btn_save_as.configure(state="disabled")
-        self._set_busy(True, f"Transcribing: {src.name} …")
+
+        self._set_busy(True, f"Transcribing: {src.name}")
+        self._start_tick()
 
         def worker() -> None:
             try:
-                result = transcribe_audio(str(src))
+                # hard timeout: 5 minutes. Adjust if you want.
+                result = transcribe_audio_safe(str(src), model_name="base", timeout_s=300)
                 text = (result or {}).get("text", "")
+                log_path = (result or {}).get("_localscribe_log_path", None)
+
                 if not text.strip():
                     raise RuntimeError(
                         "Transcription returned empty text.\n"
-                        "This often means ffmpeg/model paths are wrong in the packaged build."
+                        f"Subprocess log: {log_path}"
                     )
-                self.after(0, lambda: self._on_done(text))
+
+                self.after(0, lambda: self._on_done(text, log_path))
             except Exception as e:
                 tb = traceback.format_exc()
                 self.after(0, lambda: self._on_error(e, tb))
@@ -129,33 +160,32 @@ class App(tk.Tk):
         self._worker_thread = threading.Thread(target=worker, daemon=True)
         self._worker_thread.start()
 
-    def _on_done(self, text: str) -> None:
+    def _on_done(self, text: str, subproc_log_path: Optional[str]) -> None:
+        self._stop_tick()
         self._set_busy(False, "Done")
         self._last_transcript = text
 
         self.txt.insert("1.0", text)
         self.btn_save_as.configure(state="normal")
 
-        # Auto-save next to the audio file.
+        # Auto-save next to the source file
         if self._last_source_path is not None:
             out_path = self._last_source_path.with_suffix(self._last_source_path.suffix + ".txt")
             try:
                 out_path.write_text(text, encoding="utf-8")
-                self.lbl_status.configure(text=f"Saved: {out_path.name}")
+                if subproc_log_path:
+                    self.lbl_status.configure(text=f"Saved: {out_path.name}  |  log: {Path(subproc_log_path).name}")
+                else:
+                    self.lbl_status.configure(text=f"Saved: {out_path.name}")
             except Exception:
                 self.lbl_status.configure(text="Done (autosave failed; use Save As)")
 
     def _on_error(self, err: Exception, tb_text: str) -> None:
+        self._stop_tick()
         self._set_busy(False, "Error")
 
         src = self._last_source_path
         where = f"\n\nFile: {src}" if src else ""
-
-        header = (
-            "Transcription failed.\n\n"
-            "This dialog includes a full traceback.\n"
-            "Click “Copy traceback” and paste it back to me if you want.\n"
-        )
 
         env_info = (
             f"Time: {datetime.now().isoformat()}\n"
@@ -163,17 +193,21 @@ class App(tk.Tk):
             f"Python: {platform.python_version()}\n"
         )
 
-        # Write a debug log beside the audio file (best effort).
         log_note = ""
         if src is not None:
-            log_text = header + "\n" + env_info + "\n" + tb_text
+            log_text = env_info + "\n" + tb_text
             log_path = self._write_debug_log(src, log_text)
             if log_path is not None:
-                log_note = f"\nA debug log was also saved to:\n{log_path}"
+                log_note = f"\n\nGUI debug log saved to:\n{log_path}"
 
-        msg = f"{header}{where}\n\nError:\n{repr(err)}{log_note}\n\nEnvironment:\n{env_info}"
+        msg = (
+            "Transcription failed.\n\n"
+            f"{where}\n\n"
+            f"Error:\n{repr(err)}\n"
+            f"{log_note}\n\n"
+            f"Environment:\n{env_info}"
+        )
 
-        # Show a quick message box, then offer the full traceback dialog.
         messagebox.showerror("LocalScribe", msg)
         self._show_traceback_dialog("LocalScribe - Traceback", "Full traceback:", tb_text)
 
