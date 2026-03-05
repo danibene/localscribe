@@ -14,64 +14,74 @@ from pathlib import Path
 import whisper
 from whisper import Whisper
 
-from localscribe import __version__
-
 _logger = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------
-# Runtime resource paths
+# Runtime resource helpers
 # ------------------------------------------------------------
 
 def _resource_root() -> Path:
     """
-    Root directory for bundled resources.
+    Return the directory where bundled resources live.
 
-    In PyInstaller onefile mode resources are extracted into
-    sys._MEIPASS. In normal execution we use the module directory.
+    In PyInstaller onefile builds this is sys._MEIPASS.
     """
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS)
+
     return Path(__file__).resolve().parent
 
 
+def _ffmpeg_path() -> Path | None:
+    """
+    Return bundled ffmpeg path if present.
+    """
+    root = _resource_root()
+
+    exe = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+
+    candidates = [
+        root / exe,
+        root / "ffmpeg" / exe,
+        root / "bin" / exe,
+    ]
+
+    for p in candidates:
+        if p.exists():
+            return p
+
+    return None
+
+
 def _model_root() -> Path:
-    """Directory containing Whisper model weights."""
     return _resource_root() / "whisper_models"
 
 
-def _ensure_bundled_ffmpeg_on_path() -> None:
+def _configure_runtime() -> None:
     """
-    Ensure the bundled ffmpeg executable is discoverable.
+    Configure runtime environment for bundled execution.
     """
-    root = _resource_root()
-    ffmpeg_dir = root / "ffmpeg"
+    ssl._create_default_https_context = ssl._create_unverified_context
 
-    if not ffmpeg_dir.exists():
-        return
+    ffmpeg = _ffmpeg_path()
 
-    exe = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
-    ffmpeg_path = ffmpeg_dir / exe
-
-    if not ffmpeg_path.exists():
-        return
-
-    path = os.environ.get("PATH", "")
-    ffmpeg_dir_str = str(ffmpeg_dir)
-
-    if ffmpeg_dir_str not in path:
-        os.environ["PATH"] = ffmpeg_dir_str + os.pathsep + path
+    if ffmpeg:
+        # Force Whisper to use this ffmpeg
+        os.environ["PATH"] = str(ffmpeg.parent) + os.pathsep + os.environ.get("PATH", "")
+        os.environ["FFMPEG_BINARY"] = str(ffmpeg)
 
 
 # ------------------------------------------------------------
-# Whisper model helpers
+# Whisper helpers
 # ------------------------------------------------------------
 
 def download_model(model_name: str = "base") -> None:
     """
-    Download Whisper model into the local model directory.
+    Download Whisper model.
     """
-    ssl._create_default_https_context = ssl._create_unverified_context
+    _configure_runtime()
+
     model_dir = _model_root()
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -80,11 +90,9 @@ def download_model(model_name: str = "base") -> None:
 
 def load_model(model_name: str = "base") -> Whisper:
     """
-    Load Whisper model from bundled directory.
+    Load Whisper model.
     """
-    _ensure_bundled_ffmpeg_on_path()
-
-    ssl._create_default_https_context = ssl._create_unverified_context
+    _configure_runtime()
 
     model_dir = _model_root()
 
@@ -96,101 +104,49 @@ def load_model(model_name: str = "base") -> Whisper:
     model = whisper.load_model(model_name, download_root=str(model_dir))
 
     if model is None:
-        raise RuntimeError("Whisper returned None while loading model")
+        raise RuntimeError("Failed to load Whisper model")
 
     return model
 
 
 def transcribe_audio(file_path: str, model_name: str = "base") -> dict:
     """
-    Transcribe an audio file.
+    Transcribe audio file.
     """
-    _ensure_bundled_ffmpeg_on_path()
+    _configure_runtime()
 
     file = Path(file_path)
 
     if not file.exists():
-        raise RuntimeError(f"Input file not found: {file}")
+        raise RuntimeError(f"Audio file not found: {file}")
 
     model = load_model(model_name)
 
     result = model.transcribe(str(file))
 
-    if result is None:
-        raise RuntimeError("Whisper transcription returned None")
+    if not result:
+        raise RuntimeError("Whisper returned empty transcription result")
 
     return result
 
 
 # ------------------------------------------------------------
-# CLI helpers
+# CLI
 # ------------------------------------------------------------
 
 def parse_args(args):
-    parser = argparse.ArgumentParser(
-        description="Local audio transcription using Whisper"
-    )
+    parser = argparse.ArgumentParser(description="Local Whisper transcription")
 
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"localscribe {__version__}",
-    )
-
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        dest="loglevel",
-        action="store_const",
-        const=logging.INFO,
-    )
-
-    parser.add_argument(
-        "-vv",
-        "--very-verbose",
-        dest="loglevel",
-        action="store_const",
-        const=logging.DEBUG,
-    )
-
-    parser.add_argument(
-        "file_path",
-        nargs="?",
-        help="Audio file path",
-    )
+    parser.add_argument("file_path", nargs="?", help="Audio file")
 
     return parser.parse_args(args)
 
 
-def setup_logging(loglevel):
-    logging.basicConfig(
-        level=loglevel or logging.WARNING,
-        format="[%(asctime)s] %(levelname)s:%(name)s:%(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        stream=sys.stdout,
-    )
-
-
-# ------------------------------------------------------------
-# CLI entry points
-# ------------------------------------------------------------
-
-def download_model_cli():
-    try:
-        download_model()
-        print("Model downloaded successfully.")
-        sys.exit(0)
-    except Exception as e:
-        print(f"Model download failed: {e}")
-        sys.exit(1)
-
-
 def main(args):
     args = parse_args(args)
-    setup_logging(args.loglevel)
 
     if not args.file_path:
-        print("No audio file provided")
+        print("No file provided")
         sys.exit(1)
 
     try:
@@ -198,10 +154,10 @@ def main(args):
 
         text = result["text"]
 
-        output = Path("transcription.txt")
-        output.write_text(text, encoding="utf-8")
+        out = Path("transcription.txt")
+        out.write_text(text, encoding="utf-8")
 
-        print(f"Saved transcription to {output}")
+        print(f"Saved transcription to {out}")
 
     except Exception as e:
         print(f"Transcription failed: {e}")
