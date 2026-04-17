@@ -10,9 +10,11 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import wave
 from pathlib import Path
 from typing import Callable, Iterable
 from urllib.error import URLError
+import re
 
 from localscribe import __version__
 from localscribe.packaging import get_runtime_model_dir
@@ -85,15 +87,51 @@ def _build_missing_ffmpeg_error(exc: FileNotFoundError) -> RuntimeError:
     return RuntimeError(message)
 
 
+def _parse_ffmpeg_duration_seconds(stderr_text: str) -> float | None:
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", stderr_text)
+    if not match:
+        return None
+    hours = int(match.group(1))
+    minutes = int(match.group(2))
+    seconds = float(match.group(3))
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _probe_duration_with_wave(path: Path) -> float | None:
+    if path.suffix.lower() != ".wav":
+        return None
+    try:
+        with wave.open(str(path), "rb") as handle:
+            frame_rate = handle.getframerate()
+            frame_count = handle.getnframes()
+    except (wave.Error, EOFError, OSError):
+        return None
+    if frame_rate <= 0:
+        return None
+    return frame_count / float(frame_rate)
+
+
 def _probe_duration_seconds(file_path: str | os.PathLike[str]) -> float:
     path = _ensure_existing_file(file_path)
-    imageio_ffmpeg = _import_imageio_ffmpeg()
+
+    wave_duration = _probe_duration_with_wave(path)
+    if wave_duration is not None:
+        if wave_duration <= 0:
+            raise ValueError(f"Invalid audio duration for {path}: {wave_duration}")
+        return float(wave_duration)
+
+    command = [_ffmpeg_binary(), "-hide_banner", "-i", str(path)]
     try:
-        _frames, duration = imageio_ffmpeg.count_frames_and_secs(str(path))
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
     except FileNotFoundError as exc:
         raise _build_missing_ffmpeg_error(exc) from exc
-    if duration <= 0:
-        raise ValueError(f"Invalid audio duration for {path}: {duration}")
+
+    stderr_text = completed.stderr or completed.stdout or ""
+    duration = _parse_ffmpeg_duration_seconds(stderr_text)
+    if duration is None or duration <= 0:
+        raise RuntimeError(
+            f"Could not determine audio duration for '{path}'. FFmpeg output was:\n{stderr_text}"
+        )
     return float(duration)
 
 
