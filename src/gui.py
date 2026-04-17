@@ -1,259 +1,196 @@
-import platform
+import os
+import queue
 import threading
 import tkinter as tk
-import traceback
-from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox
-from typing import Optional
+from tkinter import filedialog, messagebox, ttk
 
-from localscribe.skeleton import transcribe_audio_safe
+from localscribe.skeleton import transcribe_audio
 
 
-class App(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("LocalScribe")
-        self.geometry("900x600")
+class LocalScribeApp:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title("Audio Transcription App")
+        self.root.geometry("760x520")
 
-        self._worker_thread: Optional[threading.Thread] = None
-        self._last_transcript: Optional[str] = None
-        self._last_source_path: Optional[Path] = None
+        self.progress_queue = queue.Queue()
+        self.worker_thread = None
+        self.selected_file = None
 
-        self._transcribe_start_ts: Optional[float] = None
-        self._tick_job: Optional[str] = None
+        self.file_var = tk.StringVar(value="No file selected")
+        self.status_var = tk.StringVar(value="Ready")
+        self.progress_var = tk.IntVar(value=0)
+        self.chunk_seconds_var = tk.IntVar(value=60)
+        self.model_var = tk.StringVar(value="base")
 
-        top = tk.Frame(self)
-        top.pack(fill="x", padx=12, pady=12)
+        self._build_ui()
+        self.root.after(100, self._poll_progress_queue)
 
-        self.btn_browse = tk.Button(
-            top, text="Select audio/video file…", command=self.on_browse
+    def _build_ui(self):
+        outer = ttk.Frame(self.root, padding=12)
+        outer.pack(fill="both", expand=True)
+
+        file_row = ttk.Frame(outer)
+        file_row.pack(fill="x", pady=(0, 10))
+
+        ttk.Button(file_row, text="Browse", command=self.browse_file).pack(side="left")
+        ttk.Label(file_row, textvariable=self.file_var).pack(
+            side="left", padx=(10, 0), fill="x", expand=True
         )
-        self.btn_browse.pack(side="left")
 
-        self.btn_save_as = tk.Button(
-            top,
-            text="Save transcription as…",
-            command=self.on_save_as,
-            state="disabled",
+        options_row = ttk.Frame(outer)
+        options_row.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(options_row, text="Chunk size (seconds)").pack(side="left")
+        ttk.Spinbox(
+            options_row,
+            from_=15,
+            to=600,
+            increment=15,
+            textvariable=self.chunk_seconds_var,
+            width=8,
+        ).pack(side="left", padx=(8, 20))
+
+        ttk.Label(options_row, text="Model").pack(side="left")
+        ttk.Combobox(
+            options_row,
+            textvariable=self.model_var,
+            values=["tiny", "base", "small", "medium", "large"],
+            state="readonly",
+            width=10,
+        ).pack(side="left", padx=(8, 0))
+
+        button_row = ttk.Frame(outer)
+        button_row.pack(fill="x", pady=(0, 10))
+
+        self.start_button = ttk.Button(
+            button_row, text="Start transcription", command=self.start_transcription
         )
-        self.btn_save_as.pack(side="left", padx=(8, 0))
+        self.start_button.pack(side="left")
 
-        self.lbl_status = tk.Label(top, text="Idle")
-        self.lbl_status.pack(side="left", padx=(12, 0))
-
-        self.txt = tk.Text(self, wrap="word")
-        self.txt.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-
-    def _set_busy(self, busy: bool, status: str) -> None:
-        self.lbl_status.configure(text=status)
-        self.btn_browse.configure(state="disabled" if busy else "normal")
-
-    def _start_tick(self) -> None:
-        import time
-
-        self._transcribe_start_ts = time.time()
-
-        def tick():
-            import time
-
-            if self._transcribe_start_ts is None:
-                return
-            elapsed = int(time.time() - self._transcribe_start_ts)
-            # keep whatever base status we had, but append elapsed
-            base = self.lbl_status.cget("text").split("  |  ")[0]
-            self.lbl_status.configure(text=f"{base}  |  {elapsed}s")
-            self._tick_job = self.after(1000, tick)
-
-        tick()
-
-    def _stop_tick(self) -> None:
-        self._transcribe_start_ts = None
-        if self._tick_job is not None:
-            try:
-                self.after_cancel(self._tick_job)
-            except Exception:
-                pass
-            self._tick_job = None
-
-    def _write_debug_log(self, src: Path, text: str) -> Optional[Path]:
-        try:
-            log_path = src.with_suffix(src.suffix + ".localscribe.gui.log.txt")
-            log_path.write_text(text, encoding="utf-8")
-            return log_path
-        except Exception:
-            return None
-
-    def _show_traceback_dialog(self, title: str, message: str, tb_text: str) -> None:
-        win = tk.Toplevel(self)
-        win.title(title)
-        win.geometry("820x520")
-        win.transient(self)
-        win.grab_set()
-
-        lbl = tk.Label(win, text=message, justify="left", anchor="w")
-        lbl.pack(fill="x", padx=12, pady=(12, 6))
-
-        frame = tk.Frame(win)
-        frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-
-        txt = tk.Text(frame, wrap="none")
-        txt.insert("1.0", tb_text)
-        txt.configure(state="disabled")
-        txt.pack(side="left", fill="both", expand=True)
-
-        yscroll = tk.Scrollbar(frame, orient="vertical", command=txt.yview)
-        yscroll.pack(side="right", fill="y")
-        txt.configure(yscrollcommand=yscroll.set)
-
-        bottom = tk.Frame(win)
-        bottom.pack(fill="x", padx=12, pady=(0, 12))
-
-        def copy_to_clipboard() -> None:
-            self.clipboard_clear()
-            self.clipboard_append(tb_text)
-            self.update()
-            messagebox.showinfo("LocalScribe", "Copied to clipboard.")
-
-        tk.Button(bottom, text="Copy traceback", command=copy_to_clipboard).pack(
-            side="left"
+        self.progress = ttk.Progressbar(
+            outer,
+            orient="horizontal",
+            mode="determinate",
+            maximum=100,
+            variable=self.progress_var,
         )
-        tk.Button(bottom, text="Close", command=win.destroy).pack(side="right")
+        self.progress.pack(fill="x", pady=(0, 8))
 
-    def on_browse(self) -> None:
+        ttk.Label(outer, textvariable=self.status_var).pack(anchor="w", pady=(0, 10))
+
+        ttk.Label(outer, text="Log").pack(anchor="w")
+        self.log_text = tk.Text(outer, height=20, wrap="word")
+        self.log_text.pack(fill="both", expand=True)
+        self.log_text.configure(state="disabled")
+
+    def browse_file(self):
         file_path = filedialog.askopenfilename(
-            title="Choose an audio/video file",
             filetypes=[
                 (
-                    "Audio/Video",
-                    "*.mp3 *.wav *.m4a *.flac *.aac *.ogg *.wma *.mp4 *.mov *.mkv",
+                    "Audio and video files",
+                    "*.mp3 *.wav *.m4a *.mp4 *.aac *.flac *.ogg *.webm *.mov *.mkv",
                 ),
                 ("All files", "*.*"),
-            ],
+            ]
         )
-        if not file_path:
-            return
+        if file_path:
+            self.selected_file = file_path
+            self.file_var.set(file_path)
+            self._append_log(f"Selected file: {file_path}")
 
-        src = Path(file_path)
-        if not src.exists():
-            messagebox.showerror("LocalScribe", f"File not found:\n{src}")
-            return
-
-        self.txt.delete("1.0", "end")
-        self._last_transcript = None
-        self._last_source_path = src
-        self.btn_save_as.configure(state="disabled")
-
-        self._set_busy(True, f"Transcribing: {src.name}")
-        self._start_tick()
-
-        def worker() -> None:
-            try:
-                # hard timeout: 5 minutes. Adjust if you want.
-                result = transcribe_audio_safe(
-                    str(src), model_name="base", timeout_s=300
-                )
-                text = (result or {}).get("text", "")
-                log_path = (result or {}).get("_localscribe_log_path", None)
-
-                if not text.strip():
-                    raise RuntimeError(
-                        "Transcription returned empty text.\n"
-                        f"Subprocess log: {log_path}"
-                    )
-
-                self.after(0, lambda: self._on_done(text, log_path))
-            except Exception as e:
-                tb = traceback.format_exc()
-                self.after(0, lambda: self._on_error(e, tb))
-
-        self._worker_thread = threading.Thread(target=worker, daemon=True)
-        self._worker_thread.start()
-
-    def _on_done(self, text: str, subproc_log_path: Optional[str]) -> None:
-        self._stop_tick()
-        self._set_busy(False, "Done")
-        self._last_transcript = text
-
-        self.txt.insert("1.0", text)
-        self.btn_save_as.configure(state="normal")
-
-        # Auto-save next to the source file
-        if self._last_source_path is not None:
-            out_path = self._last_source_path.with_suffix(
-                self._last_source_path.suffix + ".txt"
+    def start_transcription(self):
+        if self.worker_thread is not None and self.worker_thread.is_alive():
+            messagebox.showinfo(
+                "Transcription running", "A transcription is already in progress."
             )
-            try:
-                out_path.write_text(text, encoding="utf-8")
-                if subproc_log_path:
-                    self.lbl_status.configure(
-                        text=f"Saved: {out_path.name}  |  log: {Path(subproc_log_path).name}"
-                    )
-                else:
-                    self.lbl_status.configure(text=f"Saved: {out_path.name}")
-            except Exception:
-                self.lbl_status.configure(text="Done (autosave failed; use Save As)")
-
-    def _on_error(self, err: Exception, tb_text: str) -> None:
-        self._stop_tick()
-        self._set_busy(False, "Error")
-
-        src = self._last_source_path
-        where = f"\n\nFile: {src}" if src else ""
-
-        env_info = (
-            f"Time: {datetime.now().isoformat()}\n"
-            f"Platform: {platform.platform()}\n"
-            f"Python: {platform.python_version()}\n"
-        )
-
-        log_note = ""
-        if src is not None:
-            log_text = env_info + "\n" + tb_text
-            log_path = self._write_debug_log(src, log_text)
-            if log_path is not None:
-                log_note = f"\n\nGUI debug log saved to:\n{log_path}"
-
-        msg = (
-            "Transcription failed.\n\n"
-            f"{where}\n\n"
-            f"Error:\n{repr(err)}\n"
-            f"{log_note}\n\n"
-            f"Environment:\n{env_info}"
-        )
-
-        messagebox.showerror("LocalScribe", msg)
-        self._show_traceback_dialog(
-            "LocalScribe - Traceback", "Full traceback:", tb_text
-        )
-
-    def on_save_as(self) -> None:
-        if not self._last_transcript:
             return
 
-        initial_name = "transcription.txt"
-        if self._last_source_path is not None:
-            initial_name = self._last_source_path.stem + ".txt"
-
-        out_file = filedialog.asksaveasfilename(
-            title="Save transcription",
-            defaultextension=".txt",
-            initialfile=initial_name,
-            filetypes=[("Text", "*.txt"), ("All files", "*.*")],
-        )
-        if not out_file:
+        if not self.selected_file:
+            messagebox.showwarning("No file selected", "Please choose a file first.")
             return
+
+        file_path = self.selected_file
+        output_path = str(Path(file_path).with_suffix(".transcription.txt"))
+        chunk_seconds = int(self.chunk_seconds_var.get())
+        model_name = self.model_var.get().strip()
+
+        self.progress_var.set(0)
+        self.status_var.set("Starting transcription...")
+        self.start_button.configure(state="disabled")
+        self._append_log("")
+        self._append_log(f"Starting transcription for: {file_path}")
+        self._append_log(f"Chunk size: {chunk_seconds} seconds | Model: {model_name}")
+
+        self.worker_thread = threading.Thread(
+            target=self._run_transcription,
+            args=(file_path, output_path, chunk_seconds, model_name),
+            daemon=True,
+        )
+        self.worker_thread.start()
+
+    def _run_transcription(
+        self, file_path: str, output_path: str, chunk_seconds: int, model_name: str
+    ):
+        def progress_callback(update: dict):
+            self.progress_queue.put(("progress", update))
 
         try:
-            Path(out_file).write_text(self._last_transcript, encoding="utf-8")
-            self.lbl_status.configure(text=f"Saved: {Path(out_file).name}")
-        except Exception as e:
-            messagebox.showerror("LocalScribe", f"Could not save file:\n{e}")
+            transcribe_audio(
+                file_path=file_path,
+                output_path=output_path,
+                progress_callback=progress_callback,
+                chunk_seconds=chunk_seconds,
+                model_name=model_name,
+            )
+            self.progress_queue.put(("finished", {"output_path": output_path}))
+        except Exception as exc:
+            self.progress_queue.put(("error", {"message": str(exc)}))
+
+    def _poll_progress_queue(self):
+        try:
+            while True:
+                kind, payload = self.progress_queue.get_nowait()
+                if kind == "progress":
+                    self._handle_progress(payload)
+                elif kind == "finished":
+                    self.progress_var.set(100)
+                    self.status_var.set(f"Done. Saved to {payload['output_path']}")
+                    self._append_log(
+                        f"Finished. Transcript saved to: {payload['output_path']}"
+                    )
+                    self.start_button.configure(state="normal")
+                elif kind == "error":
+                    self.status_var.set("Failed")
+                    self._append_log(f"Error: {payload['message']}")
+                    self.start_button.configure(state="normal")
+                    messagebox.showerror("Transcription failed", payload["message"])
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(100, self._poll_progress_queue)
+
+    def _handle_progress(self, update: dict):
+        message = update.get("message", "")
+        progress = update.get("progress")
+        if progress is not None:
+            self.progress_var.set(progress)
+        if message:
+            self.status_var.set(message)
+            self._append_log(message)
+
+    def _append_log(self, line: str):
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", line + "\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
 
 
-def scribe() -> None:
-    app = App()
-    app.mainloop()
+def scribe():
+    root = tk.Tk()
+    LocalScribeApp(root)
+    root.mainloop()
 
 
 if __name__ == "__main__":
