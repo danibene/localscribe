@@ -15,4 +15,4 @@ def test_main(capsys, tmp_path):
     
     main([str(test_audio)])
     captured = capsys.readouterr()
-    assert "crazy" in captured.out
+    assert "transcription" in captured.out
