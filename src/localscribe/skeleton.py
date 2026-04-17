@@ -5,14 +5,17 @@ import json
 import logging
 import math
 import os
+import socket
 import ssl
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Callable, Iterable
+from urllib.error import URLError
 
 from localscribe import __version__
+from localscribe.packaging import get_runtime_model_dir
 
 __author__ = "danibene"
 __copyright__ = "danibene"
@@ -116,14 +119,66 @@ def _export_audio_chunk(
     subprocess.run(command, capture_output=True, text=True, check=True)
 
 
+def _model_filename(model_name: str) -> str:
+    return f"{model_name}.pt"
+
+
+def _is_download_error(exc: Exception) -> bool:
+    network_types = (URLError, TimeoutError, socket.timeout, ConnectionError)
+    if isinstance(exc, network_types):
+        return True
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in [
+            "urlopen error",
+            "timed out",
+            "connection attempt failed",
+            "certificate",
+            "ssl",
+        ]
+    )
+
+
+def _build_model_download_error(
+    model_name: str, model_dir: Path, exc: Exception
+) -> RuntimeError:
+    model_file = model_dir / _model_filename(model_name)
+    message = (
+        f"Could not load Whisper model '{model_name}'. LocalScribe looked in '{model_file}' and then tried to "
+        f"download it, but the download failed. This usually means the first model download was blocked by the "
+        f"network, proxy, firewall, or an offline machine. Connect to the internet once and retry, or place the "
+        f"model file at '{model_file}'. Original error: {exc}"
+    )
+    return RuntimeError(message)
+
+
 def download_model(
     model_name: str = DEFAULT_MODEL_NAME,
     progress_callback: ProgressCallback | None = None,
 ):
-    _emit_progress(progress_callback, 0.0, f"Loading Whisper model '{model_name}'")
+    model_dir = get_runtime_model_dir()
+    model_file = model_dir / _model_filename(model_name)
+    if model_file.exists():
+        _emit_progress(
+            progress_callback,
+            0.0,
+            f"Loading Whisper model '{model_name}' from {model_file}",
+        )
+    else:
+        _emit_progress(
+            progress_callback,
+            0.0,
+            f"Loading Whisper model '{model_name}' into {model_dir}",
+        )
     ssl._create_default_https_context = ssl._create_unverified_context
     whisper = _import_whisper()
-    model = whisper.load_model(model_name)
+    try:
+        model = whisper.load_model(model_name, download_root=str(model_dir))
+    except Exception as exc:
+        if _is_download_error(exc):
+            raise _build_model_download_error(model_name, model_dir, exc) from exc
+        raise
     _emit_progress(progress_callback, 1.0, f"Model '{model_name}' ready")
     return model
 
@@ -168,7 +223,7 @@ def transcribe_audio(
         progress_callback, 0.05, f"Audio duration: {total_duration:.1f} seconds"
     )
 
-    model = download_model(model_name=model_name, progress_callback=None)
+    model = download_model(model_name=model_name, progress_callback=progress_callback)
 
     all_text_parts: list[str] = []
     all_segments: list[dict] = []
@@ -338,10 +393,6 @@ def main(args: list[str]):
 
 def run():
     return main(sys.argv[1:])
-
-
-def download_model_run():
-    return main(["--download-model", *sys.argv[1:]])
 
 
 if __name__ == "__main__":
