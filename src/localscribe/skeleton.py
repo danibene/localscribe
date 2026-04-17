@@ -57,31 +57,44 @@ def _ensure_existing_file(file_path: str | os.PathLike[str]) -> Path:
     return path
 
 
+def _import_imageio_ffmpeg():
+    import imageio_ffmpeg
+
+    return imageio_ffmpeg
+
+
 def _ffmpeg_binary() -> str:
-    return os.environ.get("FFMPEG_BINARY", "ffmpeg")
+    override = os.environ.get("FFMPEG_BINARY")
+    if override:
+        return override
+    try:
+        imageio_ffmpeg = _import_imageio_ffmpeg()
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
 
 
-def _ffprobe_binary() -> str:
-    return os.environ.get("FFPROBE_BINARY", "ffprobe")
+def _build_missing_ffmpeg_error(exc: FileNotFoundError) -> RuntimeError:
+    attempted = _ffmpeg_binary()
+    message = (
+        "Could not find FFmpeg. LocalScribe needs FFmpeg to measure audio duration and export chunks. "
+        f"It tried to use '{attempted}'. Install imageio-ffmpeg correctly, bundle FFmpeg with the app, "
+        "or set the FFMPEG_BINARY environment variable to a valid ffmpeg executable. "
+        f"Original error: {exc}"
+    )
+    return RuntimeError(message)
 
 
 def _probe_duration_seconds(file_path: str | os.PathLike[str]) -> float:
     path = _ensure_existing_file(file_path)
-    command = [
-        _ffprobe_binary(),
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        str(path),
-    ]
-    result = subprocess.run(command, capture_output=True, text=True, check=True)
-    duration = float(result.stdout.strip())
+    imageio_ffmpeg = _import_imageio_ffmpeg()
+    try:
+        _frames, duration = imageio_ffmpeg.count_frames_and_secs(str(path))
+    except FileNotFoundError as exc:
+        raise _build_missing_ffmpeg_error(exc) from exc
     if duration <= 0:
         raise ValueError(f"Invalid audio duration for {path}: {duration}")
-    return duration
+    return float(duration)
 
 
 def _iter_chunk_specs(
@@ -116,7 +129,10 @@ def _export_audio_chunk(
         "pcm_s16le",
         str(output_path),
     ]
-    subprocess.run(command, capture_output=True, text=True, check=True)
+    try:
+        subprocess.run(command, capture_output=True, text=True, check=True)
+    except FileNotFoundError as exc:
+        raise _build_missing_ffmpeg_error(exc) from exc
 
 
 def _model_filename(model_name: str) -> str:
