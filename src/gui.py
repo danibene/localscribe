@@ -1,231 +1,144 @@
-import queue
+from __future__ import annotations
+
 import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from localscribe.skeleton import download_model, transcribe_audio
+from localscribe.skeleton import (
+    DEFAULT_CHUNK_SECONDS,
+    DEFAULT_MODEL_NAME,
+    download_model,
+    transcribe_audio,
+)
 
 
 class LocalScribeApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Audio Transcription App")
-        self.root.geometry("760x560")
+        self.root.title("LocalScribe")
+        self.is_busy = False
 
-        self.progress_queue = queue.Queue()
-        self.worker_thread = None
-        self.selected_file = None
-
-        self.file_var = tk.StringVar(value="No file selected")
-        self.status_var = tk.StringVar(value="Ready")
-        self.progress_var = tk.IntVar(value=0)
-        self.chunk_seconds_var = tk.IntVar(value=60)
-        self.model_var = tk.StringVar(value="base")
+        self.file_path_var = tk.StringVar()
+        self.model_name_var = tk.StringVar(value=DEFAULT_MODEL_NAME)
+        self.chunk_seconds_var = tk.StringVar(value=str(DEFAULT_CHUNK_SECONDS))
+        self.status_var = tk.StringVar(value="Select an audio file to start")
+        self.progress_var = tk.DoubleVar(value=0.0)
 
         self._build_ui()
-        self.root.after(100, self._poll_progress_queue)
 
-    def _build_ui(self):
-        outer = ttk.Frame(self.root, padding=12)
-        outer.pack(fill="both", expand=True)
+    def _build_ui(self) -> None:
+        frame = ttk.Frame(self.root, padding=12)
+        frame.pack(fill="both", expand=True)
 
-        file_row = ttk.Frame(outer)
-        file_row.pack(fill="x", pady=(0, 10))
-
-        ttk.Button(file_row, text="Browse", command=self.browse_file).pack(side="left")
-        ttk.Label(file_row, textvariable=self.file_var).pack(
-            side="left", padx=(10, 0), fill="x", expand=True
+        ttk.Label(frame, text="Audio file").grid(row=0, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.file_path_var, width=60).grid(
+            row=1, column=0, sticky="ew", padx=(0, 8)
+        )
+        ttk.Button(frame, text="Browse", command=self.browse_file).grid(
+            row=1, column=1, sticky="ew"
         )
 
-        options_row = ttk.Frame(outer)
-        options_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(frame, text="Model").grid(row=2, column=0, sticky="w", pady=(12, 0))
+        ttk.Entry(frame, textvariable=self.model_name_var, width=20).grid(
+            row=3, column=0, sticky="w"
+        )
 
-        ttk.Label(options_row, text="Chunk size (seconds)").pack(side="left")
-        ttk.Spinbox(
-            options_row,
-            from_=15,
-            to=600,
-            increment=15,
-            textvariable=self.chunk_seconds_var,
-            width=8,
-        ).pack(side="left", padx=(8, 20))
+        ttk.Label(frame, text="Chunk seconds").grid(
+            row=4, column=0, sticky="w", pady=(12, 0)
+        )
+        ttk.Entry(frame, textvariable=self.chunk_seconds_var, width=20).grid(
+            row=5, column=0, sticky="w"
+        )
 
-        ttk.Label(options_row, text="Model").pack(side="left")
-        ttk.Combobox(
-            options_row,
-            textvariable=self.model_var,
-            values=["tiny", "base", "small", "medium", "large"],
-            state="readonly",
-            width=10,
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        ttk.Button(
+            buttons, text="Download model", command=self.download_selected_model
+        ).pack(side="left")
+        ttk.Button(
+            buttons, text="Transcribe", command=self.transcribe_selected_file
         ).pack(side="left", padx=(8, 0))
 
-        button_row = ttk.Frame(outer)
-        button_row.pack(fill="x", pady=(0, 10))
-
-        self.download_button = ttk.Button(
-            button_row, text="Download model", command=self.start_download_model
+        ttk.Progressbar(frame, variable=self.progress_var, maximum=100).grid(
+            row=7, column=0, columnspan=2, sticky="ew", pady=(16, 0)
         )
-        self.download_button.pack(side="left")
+        ttk.Label(
+            frame, textvariable=self.status_var, wraplength=500, justify="left"
+        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
-        self.start_button = ttk.Button(
-            button_row, text="Start transcription", command=self.start_transcription
-        )
-        self.start_button.pack(side="left", padx=(8, 0))
+        frame.columnconfigure(0, weight=1)
 
-        self.progress = ttk.Progressbar(
-            outer,
-            orient="horizontal",
-            mode="determinate",
-            maximum=100,
-            variable=self.progress_var,
-        )
-        self.progress.pack(fill="x", pady=(0, 8))
-
-        ttk.Label(outer, textvariable=self.status_var).pack(anchor="w", pady=(0, 10))
-
-        ttk.Label(outer, text="Log").pack(anchor="w")
-        self.log_text = tk.Text(outer, height=20, wrap="word")
-        self.log_text.pack(fill="both", expand=True)
-        self.log_text.configure(state="disabled")
-
-    def browse_file(self):
-        file_path = filedialog.askopenfilename(
-            filetypes=[
-                (
-                    "Audio and video files",
-                    "*.mp3 *.wav *.m4a *.mp4 *.aac *.flac *.ogg *.webm *.mov *.mkv",
-                ),
-                ("All files", "*.*"),
-            ]
-        )
+    def browse_file(self) -> None:
+        file_path = filedialog.askopenfilename()
         if file_path:
-            self.selected_file = file_path
-            self.file_var.set(file_path)
-            self._append_log(f"Selected file: {file_path}")
+            self.file_path_var.set(file_path)
 
-    def _set_busy(self, busy: bool):
-        state = "disabled" if busy else "normal"
-        self.start_button.configure(state=state)
-        self.download_button.configure(state=state)
-
-    def start_download_model(self):
-        if self.worker_thread is not None and self.worker_thread.is_alive():
-            messagebox.showinfo("Busy", "An operation is already in progress.")
-            return
-
-        model_name = self.model_var.get().strip()
-        self.progress_var.set(0)
-        self.status_var.set(f"Downloading model {model_name}...")
-        self._append_log("")
-        self._append_log(f"Downloading model: {model_name}")
-        self._set_busy(True)
-
-        self.worker_thread = threading.Thread(
-            target=self._run_download_model,
-            args=(model_name,),
-            daemon=True,
-        )
-        self.worker_thread.start()
-
-    def start_transcription(self):
-        if self.worker_thread is not None and self.worker_thread.is_alive():
-            messagebox.showinfo("Busy", "An operation is already in progress.")
-            return
-
-        if not self.selected_file:
-            messagebox.showwarning("No file selected", "Please choose a file first.")
-            return
-
-        file_path = self.selected_file
-        output_path = str(Path(file_path).with_suffix(".transcription.txt"))
-        chunk_seconds = int(self.chunk_seconds_var.get())
-        model_name = self.model_var.get().strip()
-
-        self.progress_var.set(0)
-        self.status_var.set("Starting transcription...")
-        self._append_log("")
-        self._append_log(f"Starting transcription for: {file_path}")
-        self._append_log(f"Chunk size: {chunk_seconds} seconds | Model: {model_name}")
-        self._set_busy(True)
-
-        self.worker_thread = threading.Thread(
-            target=self._run_transcription,
-            args=(file_path, output_path, chunk_seconds, model_name),
-            daemon=True,
-        )
-        self.worker_thread.start()
-
-    def _run_download_model(self, model_name: str):
-        def progress_callback(update: dict):
-            self.progress_queue.put(("progress", update))
-
-        try:
-            download_model(model_name=model_name, progress_callback=progress_callback)
-            self.progress_queue.put(
-                ("finished", {"message": f"Model '{model_name}' is ready"})
-            )
-        except Exception as exc:
-            self.progress_queue.put(("error", {"message": str(exc)}))
-
-    def _run_transcription(
-        self, file_path: str, output_path: str, chunk_seconds: int, model_name: str
-    ):
-        def progress_callback(update: dict):
-            self.progress_queue.put(("progress", update))
-
-        try:
-            transcribe_audio(
-                file_path=file_path,
-                output_path=output_path,
-                progress_callback=progress_callback,
-                chunk_seconds=chunk_seconds,
-                model_name=model_name,
-            )
-            self.progress_queue.put(
-                ("finished", {"message": f"Transcript saved to {output_path}"})
-            )
-        except Exception as exc:
-            self.progress_queue.put(("error", {"message": str(exc)}))
-
-    def _poll_progress_queue(self):
-        try:
-            while True:
-                kind, payload = self.progress_queue.get_nowait()
-                if kind == "progress":
-                    self._handle_progress(payload)
-                elif kind == "finished":
-                    self.progress_var.set(100)
-                    self.status_var.set(payload["message"])
-                    self._append_log(payload["message"])
-                    self._set_busy(False)
-                elif kind == "error":
-                    self.status_var.set("Failed")
-                    self._append_log(f"Error: {payload['message']}")
-                    self._set_busy(False)
-                    messagebox.showerror("Operation failed", payload["message"])
-        except queue.Empty:
-            pass
-        finally:
-            self.root.after(100, self._poll_progress_queue)
-
-    def _handle_progress(self, update: dict):
-        message = update.get("message", "")
-        progress = update.get("progress")
-        if progress is not None:
-            self.progress_var.set(progress)
-        if message:
+    def _progress_callback(self, fraction: float, message: str) -> None:
+        def apply_update() -> None:
+            self.progress_var.set(max(0.0, min(100.0, fraction * 100.0)))
             self.status_var.set(message)
-            self._append_log(message)
 
-    def _append_log(self, line: str):
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", line + "\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
+        self.root.after(0, apply_update)
+
+    def _run_background(self, target, *, success_message: str) -> None:
+        if self.is_busy:
+            return
+        self.is_busy = True
+        self.progress_var.set(0.0)
+
+        def worker() -> None:
+            try:
+                target()
+                self.root.after(0, lambda: self.status_var.set(success_message))
+            except Exception as exc:  # pragma: no cover - GUI exception path
+                self.root.after(
+                    0, lambda: messagebox.showerror("LocalScribe", str(exc))
+                )
+                self.root.after(0, lambda: self.status_var.set(f"Error: {exc}"))
+            finally:
+                self.root.after(0, self._mark_idle)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _mark_idle(self) -> None:
+        self.is_busy = False
+
+    def download_selected_model(self) -> None:
+        model_name = self.model_name_var.get().strip() or DEFAULT_MODEL_NAME
+        self._run_background(
+            lambda: download_model(
+                model_name=model_name, progress_callback=self._progress_callback
+            ),
+            success_message=f"Model '{model_name}' is ready",
+        )
+
+    def transcribe_selected_file(self) -> None:
+        file_path = self.file_path_var.get().strip()
+        if not file_path:
+            messagebox.showerror("LocalScribe", "Please choose an audio file first")
+            return
+        chunk_seconds = int(
+            self.chunk_seconds_var.get().strip() or DEFAULT_CHUNK_SECONDS
+        )
+        model_name = self.model_name_var.get().strip() or DEFAULT_MODEL_NAME
+
+        def job() -> None:
+            result = transcribe_audio(
+                file_path=file_path,
+                model_name=model_name,
+                chunk_seconds=chunk_seconds,
+                progress_callback=self._progress_callback,
+            )
+            output_path = Path(result["output_text_path"])
+            self.root.after(
+                0, lambda: self.status_var.set(f"Saved transcript to {output_path}")
+            )
+
+        self._run_background(job, success_message="Transcription completed")
 
 
-def scribe():
+def scribe() -> None:
     root = tk.Tk()
     LocalScribeApp(root)
     root.mainloop()
