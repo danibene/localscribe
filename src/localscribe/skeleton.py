@@ -1,18 +1,18 @@
+from __future__ import annotations
+
+import argparse
 import json
 import logging
+import math
 import os
-import shutil
 import ssl
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable
 
-try:
-    from localscribe import __version__
-except Exception:
-    __version__ = "0.0.0"
+from localscribe import __version__
 
 __author__ = "danibene"
 __copyright__ = "danibene"
@@ -20,436 +20,328 @@ __license__ = "MIT"
 
 _logger = logging.getLogger(__name__)
 
-ProgressCallback = Optional[Callable[[dict], None]]
+ProgressCallback = Callable[[float, str], None]
+DEFAULT_MODEL_NAME = "base"
+DEFAULT_CHUNK_SECONDS = 60
 
 
-class CliUsageError(ValueError):
-    pass
+def _import_whisper():
+    import whisper
+
+    return whisper
 
 
-HELP_TEXT = """LocalScribe
-
-Usage
-  localscribe <file_path> [--output PATH] [--chunk-seconds N] [--model-name NAME] [-v|-vv]
-  localscribe --download-model [--model-name NAME] [-v|-vv]
-  localscribe --help
-  localscribe --version
-
-Examples
-  localscribe audio.mp3
-  localscribe audio.mp3 --output my_transcript.txt --chunk-seconds 30 --model-name small
-  localscribe --download-model --model-name base
-"""
-
-
-def _emit(progress_callback: ProgressCallback, **payload):
+def _emit_progress(
+    progress_callback: ProgressCallback | None, fraction: float, message: str
+) -> None:
+    clipped = max(0.0, min(1.0, float(fraction)))
     if progress_callback is not None:
-        progress_callback(payload)
+        progress_callback(clipped, message)
 
 
-_whisper_module = None
+def _stdout_progress(prefix: str = "[localscribe]") -> ProgressCallback:
+    def callback(fraction: float, message: str) -> None:
+        percent = int(round(max(0.0, min(1.0, fraction)) * 100))
+        print(f"{prefix} {percent:3d}% {message}", flush=True)
+
+    return callback
 
 
-def _get_whisper_module():
-    global _whisper_module
-    if _whisper_module is None:
-        import whisper
-
-        _whisper_module = whisper
-    return _whisper_module
+def _ensure_existing_file(file_path: str | os.PathLike[str]) -> Path:
+    path = Path(file_path).expanduser().resolve()
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"Audio file not found: {path}")
+    return path
 
 
-# ---- Python API ----
+def _ffmpeg_binary() -> str:
+    return os.environ.get("FFMPEG_BINARY", "ffmpeg")
 
 
-def download_model(
-    model_name: str = "base", progress_callback: ProgressCallback = None
-):
-    """Download/load a Whisper model and return it.
-
-    Keeping this function preserves the previous public API while allowing the
-    GUI and CLI to call the same backend.
-    """
-    ssl._create_default_https_context = ssl._create_unverified_context
-    _emit(
-        progress_callback,
-        stage="loading_model",
-        message=f"Loading Whisper model '{model_name}'",
-        progress=0,
-        model_name=model_name,
-    )
-    whisper = _get_whisper_module()
-    model = whisper.load_model(model_name)
-    _emit(
-        progress_callback,
-        stage="model_loaded",
-        message=f"Model '{model_name}' loaded",
-        progress=100,
-        model_name=model_name,
-    )
-    return model
+def _ffprobe_binary() -> str:
+    return os.environ.get("FFPROBE_BINARY", "ffprobe")
 
 
-def get_model(progress_callback: ProgressCallback = None, model_name: str = "base"):
-    """Backward-compatible alias for older code paths."""
-    return download_model(model_name=model_name, progress_callback=progress_callback)
-
-
-def _require_binary(binary_name: str):
-    if shutil.which(binary_name) is None:
-        raise RuntimeError(
-            f"Required binary '{binary_name}' was not found in PATH. Install ffmpeg/ffprobe first."
-        )
-
-
-def get_audio_duration_seconds(file_path: str) -> Optional[float]:
-    _require_binary("ffprobe")
-    cmd = [
-        "ffprobe",
+def _probe_duration_seconds(file_path: str | os.PathLike[str]) -> float:
+    path = _ensure_existing_file(file_path)
+    command = [
+        _ffprobe_binary(),
         "-v",
         "error",
         "-show_entries",
         "format=duration",
         "-of",
-        "json",
-        file_path,
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    payload = json.loads(result.stdout)
-    duration = payload.get("format", {}).get("duration")
-    if duration is None:
-        return None
-    return float(duration)
+    result = subprocess.run(command, capture_output=True, text=True, check=True)
+    duration = float(result.stdout.strip())
+    if duration <= 0:
+        raise ValueError(f"Invalid audio duration for {path}: {duration}")
+    return duration
 
 
-def chunk_audio_with_ffmpeg(file_path: str, chunk_seconds: int, output_dir: str):
-    _require_binary("ffmpeg")
-    output_pattern = os.path.join(output_dir, "chunk_%04d.wav")
-    cmd = [
-        "ffmpeg",
+def _iter_chunk_specs(
+    total_duration_seconds: float, chunk_seconds: int
+) -> Iterable[tuple[int, float, float]]:
+    if chunk_seconds <= 0:
+        raise ValueError("chunk_seconds must be a positive integer")
+    total_chunks = max(1, math.ceil(total_duration_seconds / chunk_seconds))
+    for chunk_index in range(total_chunks):
+        start = chunk_index * chunk_seconds
+        end = min(total_duration_seconds, (chunk_index + 1) * chunk_seconds)
+        yield chunk_index, start, end
+
+
+def _export_audio_chunk(
+    input_path: str | os.PathLike[str],
+    output_path: str | os.PathLike[str],
+    start_seconds: float,
+    duration_seconds: float,
+) -> None:
+    command = [
+        _ffmpeg_binary(),
         "-y",
+        "-ss",
+        f"{start_seconds:.3f}",
         "-i",
-        file_path,
+        str(input_path),
+        "-t",
+        f"{duration_seconds:.3f}",
         "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-c:a",
+        "-acodec",
         "pcm_s16le",
-        "-f",
-        "segment",
-        "-segment_time",
-        str(chunk_seconds),
-        output_pattern,
+        str(output_path),
     ]
-    subprocess.run(cmd, capture_output=True, text=True, check=True)
-    chunks = sorted(str(p) for p in Path(output_dir).glob("chunk_*.wav"))
-    if not chunks:
-        raise RuntimeError("No audio chunks were created.")
-    return chunks
+    subprocess.run(command, capture_output=True, text=True, check=True)
 
 
-def _format_timestamp(seconds: float) -> str:
-    total_ms = max(0, int(round(seconds * 1000)))
-    hours = total_ms // 3_600_000
-    minutes = (total_ms % 3_600_000) // 60_000
-    secs = (total_ms % 60_000) // 1000
-    millis = total_ms % 1000
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+def download_model(
+    model_name: str = DEFAULT_MODEL_NAME,
+    progress_callback: ProgressCallback | None = None,
+):
+    _emit_progress(progress_callback, 0.0, f"Loading Whisper model '{model_name}'")
+    ssl._create_default_https_context = ssl._create_unverified_context
+    whisper = _import_whisper()
+    model = whisper.load_model(model_name)
+    _emit_progress(progress_callback, 1.0, f"Model '{model_name}' ready")
+    return model
 
 
-def _default_output_path(file_path: str) -> str:
-    return str(Path(file_path).with_suffix(".transcription.txt"))
+def get_model(
+    model_name: str = DEFAULT_MODEL_NAME,
+    progress_callback: ProgressCallback | None = None,
+):
+    return download_model(model_name=model_name, progress_callback=progress_callback)
+
+
+def _normalize_text_parts(text_parts: list[str]) -> str:
+    joined = "\n\n".join(part.strip() for part in text_parts if part.strip()).strip()
+    return joined + ("\n" if joined else "")
 
 
 def transcribe_audio(
-    file_path: str,
-    output_path: Optional[str] = None,
-    progress_callback: ProgressCallback = None,
-    chunk_seconds: int = 60,
-    model_name: str = "base",
+    file_path: str | os.PathLike[str],
+    output_path: str | os.PathLike[str] | None = None,
+    model_name: str = DEFAULT_MODEL_NAME,
+    chunk_seconds: int = DEFAULT_CHUNK_SECONDS,
+    progress_callback: ProgressCallback | None = None,
+    language: str | None = None,
+    task: str = "transcribe",
 ):
-    if not file_path:
-        raise ValueError("file_path is required")
-    if chunk_seconds <= 0:
-        raise ValueError("chunk_seconds must be > 0")
-
-    source_path = Path(file_path)
-    if not source_path.exists():
-        raise FileNotFoundError(f"Input file not found: {file_path}")
-
+    source_path = _ensure_existing_file(file_path)
     if output_path is None:
-        output_path = _default_output_path(file_path)
+        output_base = source_path.with_suffix("")
+        output_text_path = output_base.with_suffix(".transcription.txt")
+    else:
+        output_text_path = Path(output_path).expanduser().resolve()
+        output_base = output_text_path.with_suffix("")
 
-    model = download_model(model_name=model_name, progress_callback=progress_callback)
+    output_json_path = output_base.with_suffix(".transcription.json")
+    output_segments_path = output_base.with_suffix(".transcription.segments.txt")
 
-    _emit(
-        progress_callback,
-        stage="probing_audio",
-        message="Reading audio duration",
-        progress=8,
+    _emit_progress(
+        progress_callback, 0.0, f"Preparing transcription for {source_path.name}"
     )
-    duration = get_audio_duration_seconds(file_path)
-    if duration is None or duration <= 0:
-        raise RuntimeError("Could not determine audio duration.")
-
-    estimated_chunks = max(1, int((duration + chunk_seconds - 1) // chunk_seconds))
-    _emit(
-        progress_callback,
-        stage="chunking_audio",
-        message=f"Splitting audio into about {estimated_chunks} chunk(s)",
-        progress=10,
-        duration_seconds=duration,
-        estimated_chunks=estimated_chunks,
+    total_duration = _probe_duration_seconds(source_path)
+    _emit_progress(
+        progress_callback, 0.05, f"Audio duration: {total_duration:.1f} seconds"
     )
 
-    all_text_parts = []
-    all_segments = []
+    model = download_model(model_name=model_name, progress_callback=None)
 
-    with tempfile.TemporaryDirectory(prefix="localscribe_chunks_") as temp_dir:
-        chunk_paths = chunk_audio_with_ffmpeg(
-            file_path, chunk_seconds=chunk_seconds, output_dir=temp_dir
-        )
-        total_chunks = len(chunk_paths)
-        _emit(
-            progress_callback,
-            stage="chunks_ready",
-            message=f"Created {total_chunks} chunk(s)",
-            progress=15,
-            total_chunks=total_chunks,
-        )
+    all_text_parts: list[str] = []
+    all_segments: list[dict] = []
 
-        for index, chunk_path in enumerate(chunk_paths, start=1):
-            chunk_start = (index - 1) * chunk_seconds
-            _emit(
+    with tempfile.TemporaryDirectory(prefix="localscribe_") as temp_dir:
+        chunk_specs = list(_iter_chunk_specs(total_duration, chunk_seconds))
+        total_chunks = len(chunk_specs)
+        for chunk_index, start, end in chunk_specs:
+            chunk_duration = end - start
+            chunk_path = Path(temp_dir) / f"chunk_{chunk_index:05d}.wav"
+            _emit_progress(
                 progress_callback,
-                stage="transcribing_chunk",
-                message=f"Transcribing chunk {index}/{total_chunks}",
-                chunk_index=index,
-                total_chunks=total_chunks,
-                chunk_start_seconds=chunk_start,
-                progress=15 + int(80 * (index - 1) / total_chunks),
+                0.10 + 0.80 * (chunk_index / max(1, total_chunks)),
+                f"Exporting chunk {chunk_index + 1}/{total_chunks}",
             )
+            _export_audio_chunk(source_path, chunk_path, start, chunk_duration)
 
-            result = model.transcribe(chunk_path, verbose=False)
-            chunk_text = (result.get("text") or "").strip()
+            _emit_progress(
+                progress_callback,
+                0.10 + 0.80 * (chunk_index / max(1, total_chunks)),
+                f"Transcribing chunk {chunk_index + 1}/{total_chunks}",
+            )
+            result = model.transcribe(str(chunk_path), language=language, task=task)
+            chunk_text = result.get("text", "")
             if chunk_text:
                 all_text_parts.append(chunk_text)
 
-            for segment in result.get("segments", []):
-                all_segments.append(
-                    {
-                        "start": segment["start"] + chunk_start,
-                        "end": segment["end"] + chunk_start,
-                        "text": segment["text"].strip(),
-                    }
-                )
+            for segment in result.get("segments", []) or []:
+                adjusted = dict(segment)
+                adjusted["start"] = float(adjusted.get("start", 0.0)) + start
+                adjusted["end"] = float(adjusted.get("end", 0.0)) + start
+                all_segments.append(adjusted)
 
-            _emit(
+            _emit_progress(
                 progress_callback,
-                stage="chunk_done",
-                message=f"Finished chunk {index}/{total_chunks}",
-                chunk_index=index,
-                total_chunks=total_chunks,
-                progress=15 + int(80 * index / total_chunks),
+                0.10 + 0.80 * ((chunk_index + 1) / max(1, total_chunks)),
+                f"Finished chunk {chunk_index + 1}/{total_chunks}",
             )
 
-    final_text = "\n\n".join(part for part in all_text_parts if part)
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(final_text)
-
-    segments_output_path = str(Path(output_path).with_suffix(".segments.txt"))
-    with open(segments_output_path, "w", encoding="utf-8") as f:
-        for segment in all_segments:
-            start = _format_timestamp(segment["start"])
-            end = _format_timestamp(segment["end"])
-            f.write(f"[{start} --> {end}] {segment['text']}\n")
-
-    json_output_path = str(Path(output_path).with_suffix(".json"))
-    with open(json_output_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "text": final_text,
-                "segments": all_segments,
-                "source_file": file_path,
-                "chunk_seconds": chunk_seconds,
-                "model_name": model_name,
-            },
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-    _emit(
-        progress_callback,
-        stage="done",
-        message=f"Done. Saved to {output_path}",
-        progress=100,
-        output_path=output_path,
-        segments_output_path=segments_output_path,
-        json_output_path=json_output_path,
-    )
-
-    return {
-        "text": final_text,
+    full_text = _normalize_text_parts(all_text_parts)
+    structured_result = {
+        "source": str(source_path),
+        "model_name": model_name,
+        "chunk_seconds": chunk_seconds,
+        "task": task,
+        "language": language,
+        "text": full_text,
         "segments": all_segments,
-        "output_path": output_path,
-        "segments_output_path": segments_output_path,
-        "json_output_path": json_output_path,
+    }
+
+    output_text_path.write_text(full_text, encoding="utf-8")
+    output_json_path.write_text(
+        json.dumps(structured_result, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    with output_segments_path.open("w", encoding="utf-8") as handle:
+        for segment in all_segments:
+            start = float(segment.get("start", 0.0))
+            end = float(segment.get("end", 0.0))
+            text = str(segment.get("text", "")).strip()
+            handle.write(f"[{start:8.2f} -> {end:8.2f}] {text}\n")
+
+    _emit_progress(
+        progress_callback, 1.0, f"Done. Saved transcript to {output_text_path}"
+    )
+    return {
+        "text": full_text,
+        "segments": all_segments,
+        "output_text_path": str(output_text_path),
+        "output_json_path": str(output_json_path),
+        "output_segments_path": str(output_segments_path),
     }
 
 
-# ---- CLI ----
+def parse_args(args: list[str]):
+    parser = argparse.ArgumentParser(
+        description="Transcribe audio locally with Whisper"
+    )
+    parser.add_argument(
+        "file_path", nargs="?", help="Path to the audio file to transcribe"
+    )
+    parser.add_argument(
+        "--output",
+        dest="output_path",
+        help="Optional output text path. JSON and segment files will use the same base name.",
+    )
+    parser.add_argument(
+        "--model-name", default=DEFAULT_MODEL_NAME, help="Whisper model name to load"
+    )
+    parser.add_argument(
+        "--chunk-seconds",
+        type=int,
+        default=DEFAULT_CHUNK_SECONDS,
+        help="Chunk duration in seconds for chunked transcription",
+    )
+    parser.add_argument(
+        "--language", default=None, help="Optional language hint passed to Whisper"
+    )
+    parser.add_argument(
+        "--task",
+        default="transcribe",
+        choices=["transcribe", "translate"],
+        help="Whisper task to run",
+    )
+    parser.add_argument(
+        "--download-model",
+        action="store_true",
+        help="Download or preload the specified Whisper model and exit",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"localscribe {__version__}",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="loglevel",
+        help="set loglevel to INFO",
+        action="store_const",
+        const=logging.INFO,
+    )
+    parser.add_argument(
+        "-vv",
+        "--very-verbose",
+        dest="loglevel",
+        help="set loglevel to DEBUG",
+        action="store_const",
+        const=logging.DEBUG,
+    )
+    namespace = parser.parse_args(args)
+    if not namespace.download_model and not namespace.file_path:
+        parser.error("the following arguments are required: file_path")
+    return namespace
 
 
-def _print_help():
-    print(HELP_TEXT.strip())
-
-
-def parse_cli_args(args):
-    options = {
-        "file_path": None,
-        "output": None,
-        "chunk_seconds": 60,
-        "model_name": "base",
-        "loglevel": logging.WARNING,
-        "download_model_only": False,
-    }
-
-    i = 0
-    while i < len(args):
-        arg = args[i]
-
-        if arg in ("-h", "--help"):
-            options["show_help"] = True
-            return options
-        if arg == "--version":
-            options["show_version"] = True
-            return options
-        if arg == "-v":
-            options["loglevel"] = logging.INFO
-            i += 1
-            continue
-        if arg == "-vv":
-            options["loglevel"] = logging.DEBUG
-            i += 1
-            continue
-        if arg == "--download-model":
-            options["download_model_only"] = True
-            i += 1
-            continue
-        if arg == "--output":
-            if i + 1 >= len(args):
-                raise CliUsageError("--output requires a value")
-            options["output"] = args[i + 1]
-            i += 2
-            continue
-        if arg == "--chunk-seconds":
-            if i + 1 >= len(args):
-                raise CliUsageError("--chunk-seconds requires a value")
-            try:
-                options["chunk_seconds"] = int(args[i + 1])
-            except ValueError as exc:
-                raise CliUsageError("--chunk-seconds must be an integer") from exc
-            i += 2
-            continue
-        if arg == "--model-name":
-            if i + 1 >= len(args):
-                raise CliUsageError("--model-name requires a value")
-            options["model_name"] = args[i + 1]
-            i += 2
-            continue
-        if arg.startswith("-"):
-            raise CliUsageError(f"Unknown option: {arg}")
-        if options["file_path"] is not None:
-            raise CliUsageError("Only one input file can be provided")
-        options["file_path"] = arg
-        i += 1
-
-    return options
-
-
-def setup_logging(loglevel):
-    logformat = "[%(asctime)s] %(levelname)s:%(name)s:%(message)s"
+def setup_logging(loglevel: int | None):
     logging.basicConfig(
         level=loglevel,
         stream=sys.stdout,
-        format=logformat,
+        format="[%(asctime)s] %(levelname)s:%(name)s:%(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
 
-def _console_progress(update: dict):
-    progress = update.get("progress")
-    message = update.get("message", "")
-    if progress is None:
-        print(message)
-    else:
-        print(f"[{int(progress):3d}%] {message}")
-
-
-def main(args):
-    try:
-        options = parse_cli_args(args)
-    except CliUsageError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        print("", file=sys.stderr)
-        _print_help()
-        return 2
-
-    if options.get("show_help"):
-        _print_help()
-        return 0
-
-    if options.get("show_version"):
-        print(f"localscribe {__version__}")
-        return 0
-
-    setup_logging(options["loglevel"])
-
-    if options["download_model_only"]:
+def main(args: list[str]):
+    namespace = parse_args(args)
+    setup_logging(namespace.loglevel)
+    progress_callback = _stdout_progress()
+    if namespace.download_model:
         download_model(
-            model_name=options["model_name"],
-            progress_callback=_console_progress,
+            model_name=namespace.model_name, progress_callback=progress_callback
         )
         return 0
 
-    if not options["file_path"]:
-        print(
-            "Error: file_path is required unless --download-model is used",
-            file=sys.stderr,
-        )
-        print("", file=sys.stderr)
-        _print_help()
-        return 2
-
-    transcribe_audio(
-        file_path=options["file_path"],
-        output_path=options["output"],
-        progress_callback=_console_progress,
-        chunk_seconds=options["chunk_seconds"],
-        model_name=options["model_name"],
+    result = transcribe_audio(
+        file_path=namespace.file_path,
+        output_path=namespace.output_path,
+        model_name=namespace.model_name,
+        chunk_seconds=namespace.chunk_seconds,
+        progress_callback=progress_callback,
+        language=namespace.language,
+        task=namespace.task,
     )
-    _logger.info("Script ends here")
+    _logger.info("Transcription saved to %s", result["output_text_path"])
     return 0
 
 
 def run():
-    sys.exit(main(sys.argv[1:]))
-
-
-def download_model_main(args):
-    """Dedicated wrapper for the getwhispermodel entry point."""
-    cli_args = list(args)
-    if "--download-model" not in cli_args:
-        cli_args = ["--download-model"] + cli_args
-    return main(cli_args)
+    return main(sys.argv[1:])
 
 
 def download_model_run():
-    sys.exit(download_model_main(sys.argv[1:]))
+    return main(["--download-model", *sys.argv[1:]])
 
 
 if __name__ == "__main__":
