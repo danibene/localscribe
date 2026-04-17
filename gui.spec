@@ -1,8 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files
 from localscribe.packaging import get_pyinstaller_datas
 
 
-datas = get_pyinstaller_datas()
+datas = get_pyinstaller_datas() + collect_data_files('imageio_ffmpeg')
 
 
 a = Analysis(
