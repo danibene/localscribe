@@ -79,12 +79,29 @@ def _ffmpeg_binary() -> str:
 def _build_missing_ffmpeg_error(exc: FileNotFoundError) -> RuntimeError:
     attempted = _ffmpeg_binary()
     message = (
-        "Could not find FFmpeg. LocalScribe needs FFmpeg to measure audio duration and export chunks. "
+        "Could not find FFmpeg. LocalScribe needs FFmpeg to measure audio duration, export chunks, and let "
+        "Whisper decode chunk audio during transcription. "
         f"It tried to use '{attempted}'. Install imageio-ffmpeg correctly, bundle FFmpeg with the app, "
         "or set the FFMPEG_BINARY environment variable to a valid ffmpeg executable. "
         f"Original error: {exc}"
     )
     return RuntimeError(message)
+
+
+def _ensure_ffmpeg_on_path() -> str:
+    ffmpeg_exe = _ffmpeg_binary()
+    ffmpeg_dir = str(Path(ffmpeg_exe).expanduser().parent)
+    current_path = os.environ.get("PATH", "")
+    path_entries = current_path.split(os.pathsep) if current_path else []
+    normalized = {
+        entry.lower() if os.name == "nt" else entry for entry in path_entries if entry
+    }
+    normalized_dir = ffmpeg_dir.lower() if os.name == "nt" else ffmpeg_dir
+    if normalized_dir not in normalized:
+        os.environ["PATH"] = (
+            ffmpeg_dir if not current_path else ffmpeg_dir + os.pathsep + current_path
+        )
+    return ffmpeg_exe
 
 
 def _parse_ffmpeg_duration_seconds(stderr_text: str) -> float | None:
@@ -113,6 +130,7 @@ def _probe_duration_with_wave(path: Path) -> float | None:
 
 def _probe_duration_seconds(file_path: str | os.PathLike[str]) -> float:
     path = _ensure_existing_file(file_path)
+    _ensure_ffmpeg_on_path()
 
     wave_duration = _probe_duration_with_wave(path)
     if wave_duration is not None:
@@ -153,6 +171,7 @@ def _export_audio_chunk(
     start_seconds: float,
     duration_seconds: float,
 ) -> None:
+    _ensure_ffmpeg_on_path()
     command = [
         _ffmpeg_binary(),
         "-y",
@@ -211,6 +230,7 @@ def download_model(
     model_name: str = DEFAULT_MODEL_NAME,
     progress_callback: ProgressCallback | None = None,
 ):
+    _ensure_ffmpeg_on_path()
     model_dir = get_runtime_model_dir()
     model_file = model_dir / _model_filename(model_name)
     if model_file.exists():
@@ -300,7 +320,10 @@ def transcribe_audio(
                 0.10 + 0.80 * (chunk_index / max(1, total_chunks)),
                 f"Transcribing chunk {chunk_index + 1}/{total_chunks}",
             )
-            result = model.transcribe(str(chunk_path), language=language, task=task)
+            try:
+                result = model.transcribe(str(chunk_path), language=language, task=task)
+            except FileNotFoundError as exc:
+                raise _build_missing_ffmpeg_error(exc) from exc
             chunk_text = result.get("text", "")
             if chunk_text:
                 all_text_parts.append(chunk_text)
