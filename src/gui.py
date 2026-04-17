@@ -4,14 +4,14 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from localscribe.skeleton import transcribe_audio
+from localscribe.skeleton import download_model, transcribe_audio
 
 
 class LocalScribeApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Audio Transcription App")
-        self.root.geometry("760x520")
+        self.root.geometry("760x560")
 
         self.progress_queue = queue.Queue()
         self.worker_thread = None
@@ -63,10 +63,15 @@ class LocalScribeApp:
         button_row = ttk.Frame(outer)
         button_row.pack(fill="x", pady=(0, 10))
 
+        self.download_button = ttk.Button(
+            button_row, text="Download model", command=self.start_download_model
+        )
+        self.download_button.pack(side="left")
+
         self.start_button = ttk.Button(
             button_row, text="Start transcription", command=self.start_transcription
         )
-        self.start_button.pack(side="left")
+        self.start_button.pack(side="left", padx=(8, 0))
 
         self.progress = ttk.Progressbar(
             outer,
@@ -99,11 +104,33 @@ class LocalScribeApp:
             self.file_var.set(file_path)
             self._append_log(f"Selected file: {file_path}")
 
+    def _set_busy(self, busy: bool):
+        state = "disabled" if busy else "normal"
+        self.start_button.configure(state=state)
+        self.download_button.configure(state=state)
+
+    def start_download_model(self):
+        if self.worker_thread is not None and self.worker_thread.is_alive():
+            messagebox.showinfo("Busy", "An operation is already in progress.")
+            return
+
+        model_name = self.model_var.get().strip()
+        self.progress_var.set(0)
+        self.status_var.set(f"Downloading model {model_name}...")
+        self._append_log("")
+        self._append_log(f"Downloading model: {model_name}")
+        self._set_busy(True)
+
+        self.worker_thread = threading.Thread(
+            target=self._run_download_model,
+            args=(model_name,),
+            daemon=True,
+        )
+        self.worker_thread.start()
+
     def start_transcription(self):
         if self.worker_thread is not None and self.worker_thread.is_alive():
-            messagebox.showinfo(
-                "Transcription running", "A transcription is already in progress."
-            )
+            messagebox.showinfo("Busy", "An operation is already in progress.")
             return
 
         if not self.selected_file:
@@ -117,10 +144,10 @@ class LocalScribeApp:
 
         self.progress_var.set(0)
         self.status_var.set("Starting transcription...")
-        self.start_button.configure(state="disabled")
         self._append_log("")
         self._append_log(f"Starting transcription for: {file_path}")
         self._append_log(f"Chunk size: {chunk_seconds} seconds | Model: {model_name}")
+        self._set_busy(True)
 
         self.worker_thread = threading.Thread(
             target=self._run_transcription,
@@ -128,6 +155,18 @@ class LocalScribeApp:
             daemon=True,
         )
         self.worker_thread.start()
+
+    def _run_download_model(self, model_name: str):
+        def progress_callback(update: dict):
+            self.progress_queue.put(("progress", update))
+
+        try:
+            download_model(model_name=model_name, progress_callback=progress_callback)
+            self.progress_queue.put(
+                ("finished", {"message": f"Model '{model_name}' is ready"})
+            )
+        except Exception as exc:
+            self.progress_queue.put(("error", {"message": str(exc)}))
 
     def _run_transcription(
         self, file_path: str, output_path: str, chunk_seconds: int, model_name: str
@@ -143,7 +182,9 @@ class LocalScribeApp:
                 chunk_seconds=chunk_seconds,
                 model_name=model_name,
             )
-            self.progress_queue.put(("finished", {"output_path": output_path}))
+            self.progress_queue.put(
+                ("finished", {"message": f"Transcript saved to {output_path}"})
+            )
         except Exception as exc:
             self.progress_queue.put(("error", {"message": str(exc)}))
 
@@ -155,16 +196,14 @@ class LocalScribeApp:
                     self._handle_progress(payload)
                 elif kind == "finished":
                     self.progress_var.set(100)
-                    self.status_var.set(f"Done. Saved to {payload['output_path']}")
-                    self._append_log(
-                        f"Finished. Transcript saved to: {payload['output_path']}"
-                    )
-                    self.start_button.configure(state="normal")
+                    self.status_var.set(payload["message"])
+                    self._append_log(payload["message"])
+                    self._set_busy(False)
                 elif kind == "error":
                     self.status_var.set("Failed")
                     self._append_log(f"Error: {payload['message']}")
-                    self.start_button.configure(state="normal")
-                    messagebox.showerror("Transcription failed", payload["message"])
+                    self._set_busy(False)
+                    messagebox.showerror("Operation failed", payload["message"])
         except queue.Empty:
             pass
         finally:
