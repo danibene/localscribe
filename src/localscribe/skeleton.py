@@ -1,4 +1,3 @@
-import argparse
 import json
 import logging
 import os
@@ -9,9 +8,6 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Callable, Optional
-
-import whisper
-from whisper import Whisper
 
 try:
     from localscribe import __version__
@@ -27,29 +23,76 @@ _logger = logging.getLogger(__name__)
 ProgressCallback = Optional[Callable[[dict], None]]
 
 
+class CliUsageError(ValueError):
+    pass
+
+
+HELP_TEXT = """LocalScribe
+
+Usage
+  localscribe <file_path> [--output PATH] [--chunk-seconds N] [--model-name NAME] [-v|-vv]
+  localscribe --download-model [--model-name NAME] [-v|-vv]
+  localscribe --help
+  localscribe --version
+
+Examples
+  localscribe audio.mp3
+  localscribe audio.mp3 --output my_transcript.txt --chunk-seconds 30 --model-name small
+  localscribe --download-model --model-name base
+"""
+
+
 def _emit(progress_callback: ProgressCallback, **payload):
     if progress_callback is not None:
         progress_callback(payload)
 
 
-def get_model(
-    progress_callback: ProgressCallback = None, model_name: str = "base"
-) -> Whisper:
+_whisper_module = None
+
+
+def _get_whisper_module():
+    global _whisper_module
+    if _whisper_module is None:
+        import whisper
+
+        _whisper_module = whisper
+    return _whisper_module
+
+
+# ---- Python API ----
+
+
+def download_model(
+    model_name: str = "base", progress_callback: ProgressCallback = None
+):
+    """Download/load a Whisper model and return it.
+
+    Keeping this function preserves the previous public API while allowing the
+    GUI and CLI to call the same backend.
+    """
     ssl._create_default_https_context = ssl._create_unverified_context
     _emit(
         progress_callback,
         stage="loading_model",
         message=f"Loading Whisper model '{model_name}'",
         progress=0,
+        model_name=model_name,
     )
+    whisper = _get_whisper_module()
     model = whisper.load_model(model_name)
     _emit(
         progress_callback,
         stage="model_loaded",
         message=f"Model '{model_name}' loaded",
-        progress=5,
+        progress=100,
+        model_name=model_name,
     )
     return model
+
+
+def get_model(progress_callback: ProgressCallback = None, model_name: str = "base"):
+    """Backward-compatible alias for older code paths."""
+    return download_model(model_name=model_name, progress_callback=progress_callback)
 
 
 def _require_binary(binary_name: str):
@@ -116,14 +159,30 @@ def _format_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
 
 
+def _default_output_path(file_path: str) -> str:
+    return str(Path(file_path).with_suffix(".transcription.txt"))
+
+
 def transcribe_audio(
     file_path: str,
-    output_path: str = "transcription.txt",
+    output_path: Optional[str] = None,
     progress_callback: ProgressCallback = None,
     chunk_seconds: int = 60,
     model_name: str = "base",
 ):
-    model = get_model(progress_callback=progress_callback, model_name=model_name)
+    if not file_path:
+        raise ValueError("file_path is required")
+    if chunk_seconds <= 0:
+        raise ValueError("chunk_seconds must be > 0")
+
+    source_path = Path(file_path)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Input file not found: {file_path}")
+
+    if output_path is None:
+        output_path = _default_output_path(file_path)
+
+    model = download_model(model_name=model_name, progress_callback=progress_callback)
 
     _emit(
         progress_callback,
@@ -245,73 +304,152 @@ def transcribe_audio(
 # ---- CLI ----
 
 
-def parse_args(args):
-    parser = argparse.ArgumentParser(
-        description="Transcribe an audio file with chunked progress updates"
-    )
-    parser.add_argument("file_path", help="Path to the audio file to transcribe")
-    parser.add_argument(
-        "--output", default="transcription.txt", help="Output transcript file"
-    )
-    parser.add_argument(
-        "--chunk-seconds", type=int, default=60, help="Chunk size in seconds"
-    )
-    parser.add_argument("--model-name", default="base", help="Whisper model name")
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"localscribe {__version__}",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        dest="loglevel",
-        help="set loglevel to INFO",
-        action="store_const",
-        const=logging.INFO,
-    )
-    parser.add_argument(
-        "-vv",
-        "--very-verbose",
-        dest="loglevel",
-        help="set loglevel to DEBUG",
-        action="store_const",
-        const=logging.DEBUG,
-    )
-    return parser.parse_args(args)
+def _print_help():
+    print(HELP_TEXT.strip())
+
+
+def parse_cli_args(args):
+    options = {
+        "file_path": None,
+        "output": None,
+        "chunk_seconds": 60,
+        "model_name": "base",
+        "loglevel": logging.WARNING,
+        "download_model_only": False,
+    }
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+
+        if arg in ("-h", "--help"):
+            options["show_help"] = True
+            return options
+        if arg == "--version":
+            options["show_version"] = True
+            return options
+        if arg == "-v":
+            options["loglevel"] = logging.INFO
+            i += 1
+            continue
+        if arg == "-vv":
+            options["loglevel"] = logging.DEBUG
+            i += 1
+            continue
+        if arg == "--download-model":
+            options["download_model_only"] = True
+            i += 1
+            continue
+        if arg == "--output":
+            if i + 1 >= len(args):
+                raise CliUsageError("--output requires a value")
+            options["output"] = args[i + 1]
+            i += 2
+            continue
+        if arg == "--chunk-seconds":
+            if i + 1 >= len(args):
+                raise CliUsageError("--chunk-seconds requires a value")
+            try:
+                options["chunk_seconds"] = int(args[i + 1])
+            except ValueError as exc:
+                raise CliUsageError("--chunk-seconds must be an integer") from exc
+            i += 2
+            continue
+        if arg == "--model-name":
+            if i + 1 >= len(args):
+                raise CliUsageError("--model-name requires a value")
+            options["model_name"] = args[i + 1]
+            i += 2
+            continue
+        if arg.startswith("-"):
+            raise CliUsageError(f"Unknown option: {arg}")
+        if options["file_path"] is not None:
+            raise CliUsageError("Only one input file can be provided")
+        options["file_path"] = arg
+        i += 1
+
+    return options
 
 
 def setup_logging(loglevel):
     logformat = "[%(asctime)s] %(levelname)s:%(name)s:%(message)s"
     logging.basicConfig(
-        level=loglevel, stream=sys.stdout, format=logformat, datefmt="%Y-%m-%d %H:%M:%S"
+        level=loglevel,
+        stream=sys.stdout,
+        format=logformat,
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+
+def _console_progress(update: dict):
+    progress = update.get("progress")
+    message = update.get("message", "")
+    if progress is None:
+        print(message)
+    else:
+        print(f"[{int(progress):3d}%] {message}")
 
 
 def main(args):
-    args = parse_args(args)
-    setup_logging(args.loglevel)
+    try:
+        options = parse_cli_args(args)
+    except CliUsageError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        print("", file=sys.stderr)
+        _print_help()
+        return 2
 
-    def console_progress(update: dict):
-        progress = update.get("progress")
-        message = update.get("message", "")
-        if progress is None:
-            print(message)
-        else:
-            print(f"[{progress:3d}%] {message}")
+    if options.get("show_help"):
+        _print_help()
+        return 0
+
+    if options.get("show_version"):
+        print(f"localscribe {__version__}")
+        return 0
+
+    setup_logging(options["loglevel"])
+
+    if options["download_model_only"]:
+        download_model(
+            model_name=options["model_name"],
+            progress_callback=_console_progress,
+        )
+        return 0
+
+    if not options["file_path"]:
+        print(
+            "Error: file_path is required unless --download-model is used",
+            file=sys.stderr,
+        )
+        print("", file=sys.stderr)
+        _print_help()
+        return 2
 
     transcribe_audio(
-        file_path=args.file_path,
-        output_path=args.output,
-        progress_callback=console_progress,
-        chunk_seconds=args.chunk_seconds,
-        model_name=args.model_name,
+        file_path=options["file_path"],
+        output_path=options["output"],
+        progress_callback=_console_progress,
+        chunk_seconds=options["chunk_seconds"],
+        model_name=options["model_name"],
     )
     _logger.info("Script ends here")
+    return 0
 
 
 def run():
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))
+
+
+def download_model_main(args):
+    """Dedicated wrapper for the getwhispermodel entry point."""
+    cli_args = list(args)
+    if "--download-model" not in cli_args:
+        cli_args = ["--download-model"] + cli_args
+    return main(cli_args)
+
+
+def download_model_run():
+    sys.exit(download_model_main(sys.argv[1:]))
 
 
 if __name__ == "__main__":
