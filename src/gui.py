@@ -26,7 +26,9 @@ class App(tk.Tk):
         top = tk.Frame(self)
         top.pack(fill="x", padx=12, pady=12)
 
-        self.btn_browse = tk.Button(top, text="Select audio/video file…", command=self.on_browse)
+        self.btn_browse = tk.Button(
+            top, text="Select audio/video file…", command=self.on_browse
+        )
         self.btn_browse.pack(side="left")
 
         self.btn_save_as = tk.Button(
@@ -54,6 +56,7 @@ class App(tk.Tk):
 
         def tick():
             import time
+
             if self._transcribe_start_ts is None:
                 return
             elapsed = int(time.time() - self._transcribe_start_ts)
@@ -112,14 +115,19 @@ class App(tk.Tk):
             self.update()
             messagebox.showinfo("LocalScribe", "Copied to clipboard.")
 
-        tk.Button(bottom, text="Copy traceback", command=copy_to_clipboard).pack(side="left")
+        tk.Button(bottom, text="Copy traceback", command=copy_to_clipboard).pack(
+            side="left"
+        )
         tk.Button(bottom, text="Close", command=win.destroy).pack(side="right")
 
     def on_browse(self) -> None:
         file_path = filedialog.askopenfilename(
             title="Choose an audio/video file",
             filetypes=[
-                ("Audio/Video", "*.mp3 *.wav *.m4a *.flac *.aac *.ogg *.wma *.mp4 *.mov *.mkv"),
+                (
+                    "Audio/Video",
+                    "*.mp3 *.wav *.m4a *.flac *.aac *.ogg *.wma *.mp4 *.mov *.mkv",
+                ),
                 ("All files", "*.*"),
             ],
         )
@@ -142,7 +150,9 @@ class App(tk.Tk):
         def worker() -> None:
             try:
                 # hard timeout: 5 minutes. Adjust if you want.
-                result = transcribe_audio_safe(str(src), model_name="base", timeout_s=300)
+                result = transcribe_audio_safe(
+                    str(src), model_name="base", timeout_s=300
+                )
                 text = (result or {}).get("text", "")
                 log_path = (result or {}).get("_localscribe_log_path", None)
 
@@ -170,11 +180,15 @@ class App(tk.Tk):
 
         # Auto-save next to the source file
         if self._last_source_path is not None:
-            out_path = self._last_source_path.with_suffix(self._last_source_path.suffix + ".txt")
+            out_path = self._last_source_path.with_suffix(
+                self._last_source_path.suffix + ".txt"
+            )
             try:
                 out_path.write_text(text, encoding="utf-8")
                 if subproc_log_path:
-                    self.lbl_status.configure(text=f"Saved: {out_path.name}  |  log: {Path(subproc_log_path).name}")
+                    self.lbl_status.configure(
+                        text=f"Saved: {out_path.name}  |  log: {Path(subproc_log_path).name}"
+                    )
                 else:
                     self.lbl_status.configure(text=f"Saved: {out_path.name}")
             except Exception:
@@ -209,7 +223,9 @@ class App(tk.Tk):
         )
 
         messagebox.showerror("LocalScribe", msg)
-        self._show_traceback_dialog("LocalScribe - Traceback", "Full traceback:", tb_text)
+        self._show_traceback_dialog(
+            "LocalScribe - Traceback", "Full traceback:", tb_text
+        )
 
     def on_save_as(self) -> None:
         if not self._last_transcript:
