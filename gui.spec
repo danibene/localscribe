@@ -1,15 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_data_files
-from localscribe.packaging import get_pyinstaller_datas
+from localscribe.packaging import get_pyinstaller_binaries, get_pyinstaller_datas
 
 
-datas = get_pyinstaller_datas() + collect_data_files('imageio_ffmpeg')
+datas = get_pyinstaller_datas()
+binaries = get_pyinstaller_binaries()
 
 
 a = Analysis(
     ['src/gui.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=[],
     hookspath=[],

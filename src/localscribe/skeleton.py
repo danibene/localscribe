@@ -17,7 +17,7 @@ from urllib.error import URLError
 import re
 
 from localscribe import __version__
-from localscribe.packaging import get_runtime_model_dir
+from localscribe.packaging import get_runtime_ffmpeg_binary, get_runtime_model_dir
 
 __author__ = "danibene"
 __copyright__ = "danibene"
@@ -66,42 +66,40 @@ def _import_imageio_ffmpeg():
 
 
 def _ffmpeg_binary() -> str:
-    override = os.environ.get("FFMPEG_BINARY")
-    if override:
-        return override
     try:
-        imageio_ffmpeg = _import_imageio_ffmpeg()
-        return imageio_ffmpeg.get_ffmpeg_exe()
+        return str(get_runtime_ffmpeg_binary())
     except Exception:
-        return "ffmpeg"
+        override = os.environ.get("FFMPEG_BINARY")
+        if override:
+            return override
+        try:
+            imageio_ffmpeg = _import_imageio_ffmpeg()
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return "ffmpeg"
+
+
+def _ensure_ffmpeg_on_path() -> str:
+    ffmpeg_executable = _ffmpeg_binary()
+    ffmpeg_path = Path(ffmpeg_executable)
+    if ffmpeg_path.is_file():
+        ffmpeg_dir = str(ffmpeg_path.parent)
+        current_path = os.environ.get("PATH", "")
+        path_parts = current_path.split(os.pathsep) if current_path else []
+        if ffmpeg_dir not in path_parts:
+            os.environ["PATH"] = ffmpeg_dir + (os.pathsep + current_path if current_path else "")
+    return ffmpeg_executable
 
 
 def _build_missing_ffmpeg_error(exc: FileNotFoundError) -> RuntimeError:
     attempted = _ffmpeg_binary()
     message = (
-        "Could not find FFmpeg. LocalScribe needs FFmpeg to measure audio duration, export chunks, and let "
-        "Whisper decode chunk audio during transcription. "
+        "Could not find FFmpeg. LocalScribe needs FFmpeg to measure audio duration, export chunks, and let Whisper decode chunk audio during transcription. "
         f"It tried to use '{attempted}'. Install imageio-ffmpeg correctly, bundle FFmpeg with the app, "
         "or set the FFMPEG_BINARY environment variable to a valid ffmpeg executable. "
         f"Original error: {exc}"
     )
     return RuntimeError(message)
-
-
-def _ensure_ffmpeg_on_path() -> str:
-    ffmpeg_exe = _ffmpeg_binary()
-    ffmpeg_dir = str(Path(ffmpeg_exe).expanduser().parent)
-    current_path = os.environ.get("PATH", "")
-    path_entries = current_path.split(os.pathsep) if current_path else []
-    normalized = {
-        entry.lower() if os.name == "nt" else entry for entry in path_entries if entry
-    }
-    normalized_dir = ffmpeg_dir.lower() if os.name == "nt" else ffmpeg_dir
-    if normalized_dir not in normalized:
-        os.environ["PATH"] = (
-            ffmpeg_dir if not current_path else ffmpeg_dir + os.pathsep + current_path
-        )
-    return ffmpeg_exe
 
 
 def _parse_ffmpeg_duration_seconds(stderr_text: str) -> float | None:
@@ -130,7 +128,6 @@ def _probe_duration_with_wave(path: Path) -> float | None:
 
 def _probe_duration_seconds(file_path: str | os.PathLike[str]) -> float:
     path = _ensure_existing_file(file_path)
-    _ensure_ffmpeg_on_path()
 
     wave_duration = _probe_duration_with_wave(path)
     if wave_duration is not None:
@@ -138,7 +135,7 @@ def _probe_duration_seconds(file_path: str | os.PathLike[str]) -> float:
             raise ValueError(f"Invalid audio duration for {path}: {wave_duration}")
         return float(wave_duration)
 
-    command = [_ffmpeg_binary(), "-hide_banner", "-i", str(path)]
+    command = [_ensure_ffmpeg_on_path(), "-hide_banner", "-i", str(path)]
     try:
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
     except FileNotFoundError as exc:
@@ -171,9 +168,8 @@ def _export_audio_chunk(
     start_seconds: float,
     duration_seconds: float,
 ) -> None:
-    _ensure_ffmpeg_on_path()
     command = [
-        _ffmpeg_binary(),
+        _ensure_ffmpeg_on_path(),
         "-y",
         "-ss",
         f"{start_seconds:.3f}",
