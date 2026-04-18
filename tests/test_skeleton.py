@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -110,7 +109,9 @@ def test_download_model_adds_ffmpeg_to_path(monkeypatch, tmp_path):
         load_calls.append((model_name, download_root))
         return SimpleNamespace()
 
-    monkeypatch.setattr(skeleton, "_import_whisper", lambda: SimpleNamespace(load_model=fake_load_model))
+    monkeypatch.setattr(
+        skeleton, "_import_whisper", lambda: SimpleNamespace(load_model=fake_load_model)
+    )
     monkeypatch.setenv("PATH", "")
 
     skeleton.download_model(model_name="base")
@@ -122,7 +123,15 @@ def test_download_model_adds_ffmpeg_to_path(monkeypatch, tmp_path):
 def test_transcribe_wraps_whisper_missing_ffmpeg(sample_audio, monkeypatch, tmp_path):
     monkeypatch.setattr(skeleton, "_probe_duration_seconds", lambda _path: 1.0)
     monkeypatch.setattr(skeleton, "_export_audio_chunk", lambda *args, **kwargs: None)
-    monkeypatch.setattr(skeleton, "download_model", lambda **kwargs: SimpleNamespace(transcribe=lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("ffmpeg missing"))))
+    monkeypatch.setattr(
+        skeleton,
+        "download_model",
+        lambda **kwargs: SimpleNamespace(
+            transcribe=lambda *a, **k: (_ for _ in ()).throw(
+                FileNotFoundError("ffmpeg missing")
+            )
+        ),
+    )
 
     with pytest.raises(RuntimeError, match="Could not find FFmpeg"):
         skeleton.transcribe_audio(str(sample_audio), output_path=tmp_path / "out.txt")

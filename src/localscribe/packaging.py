@@ -5,7 +5,6 @@ import sys
 from importlib import import_module
 from pathlib import Path
 
-
 ENV_MODEL_DIR = "LOCALSCRIBE_MODEL_DIR"
 ENV_FFMPEG_BINARY = "FFMPEG_BINARY"
 

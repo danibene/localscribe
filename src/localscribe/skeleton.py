@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import socket
 import ssl
 import subprocess
@@ -14,7 +15,6 @@ import wave
 from pathlib import Path
 from typing import Callable, Iterable
 from urllib.error import URLError
-import re
 
 from localscribe import __version__
 from localscribe.packaging import get_runtime_ffmpeg_binary, get_runtime_model_dir
@@ -87,15 +87,19 @@ def _ensure_ffmpeg_on_path() -> str:
         current_path = os.environ.get("PATH", "")
         path_parts = current_path.split(os.pathsep) if current_path else []
         if ffmpeg_dir not in path_parts:
-            os.environ["PATH"] = ffmpeg_dir + (os.pathsep + current_path if current_path else "")
+            os.environ["PATH"] = ffmpeg_dir + (
+                os.pathsep + current_path if current_path else ""
+            )
     return ffmpeg_executable
 
 
 def _build_missing_ffmpeg_error(exc: FileNotFoundError) -> RuntimeError:
     attempted = _ffmpeg_binary()
     message = (
-        "Could not find FFmpeg. LocalScribe needs FFmpeg to measure audio duration, export chunks, and let Whisper decode chunk audio during transcription. "
-        f"It tried to use '{attempted}'. Install imageio-ffmpeg correctly, bundle FFmpeg with the app, "
+        "Could not find FFmpeg. LocalScribe needs FFmpeg to measure audio duration,"
+        " export chunks, and let Whisper decode chunk audio during transcription. "
+        f"It tried to use '{attempted}'. Install imageio-ffmpeg correctly,"
+        " bundle FFmpeg with the app, "
         "or set the FFMPEG_BINARY environment variable to a valid ffmpeg executable. "
         f"Original error: {exc}"
     )
@@ -145,7 +149,8 @@ def _probe_duration_seconds(file_path: str | os.PathLike[str]) -> float:
     duration = _parse_ffmpeg_duration_seconds(stderr_text)
     if duration is None or duration <= 0:
         raise RuntimeError(
-            f"Could not determine audio duration for '{path}'. FFmpeg output was:\n{stderr_text}"
+            f"Could not determine audio duration for '{path}'. "
+            "FFmpeg output was:\n{stderr_text}"
         )
     return float(duration)
 
@@ -214,9 +219,12 @@ def _build_model_download_error(
 ) -> RuntimeError:
     model_file = model_dir / _model_filename(model_name)
     message = (
-        f"Could not load Whisper model '{model_name}'. LocalScribe looked in '{model_file}' and then tried to "
-        f"download it, but the download failed. This usually means the first model download was blocked by the "
-        f"network, proxy, firewall, or an offline machine. Connect to the internet once and retry, or place the "
+        f"Could not load Whisper model '{model_name}'. "
+        f"LocalScribe looked in '{model_file}' and then tried to "
+        f"download it, but the download failed. This usually means "
+        f"the first model download was blocked by the "
+        f"network, proxy, firewall, or an offline machine. "
+        f"Connect to the internet once and retry, or place the "
         f"model file at '{model_file}'. Original error: {exc}"
     )
     return RuntimeError(message)
@@ -380,7 +388,8 @@ def parse_args(args: list[str]):
     parser.add_argument(
         "--output",
         dest="output_path",
-        help="Optional output text path. JSON and segment files will use the same base name.",
+        help="Optional output text path."
+        + " JSON and segment files will use the same base name.",
     )
     parser.add_argument(
         "--model-name", default=DEFAULT_MODEL_NAME, help="Whisper model name to load"

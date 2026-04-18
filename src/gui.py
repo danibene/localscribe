@@ -92,10 +92,13 @@ class LocalScribeApp:
                 target()
                 self.root.after(0, lambda: self.status_var.set(success_message))
             except Exception as exc:  # pragma: no cover - GUI exception path
+                exception_message = str(exc)
                 self.root.after(
-                    0, lambda: messagebox.showerror("LocalScribe", str(exc))
+                    0, lambda: messagebox.showerror("LocalScribe", exception_message)
                 )
-                self.root.after(0, lambda: self.status_var.set(f"Error: {exc}"))
+                self.root.after(
+                    0, lambda: self.status_var.set(f"Error: {exception_message}")
+                )
             finally:
                 self.root.after(0, self._mark_idle)
 
