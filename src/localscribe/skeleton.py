@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import os
 import re
 import socket
@@ -28,6 +27,7 @@ _logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[float, str], None]
 DEFAULT_MODEL_NAME = "base"
 DEFAULT_CHUNK_SECONDS = 60
+DEFAULT_OVERLAP_SECONDS = 5
 
 
 def _import_whisper():
@@ -57,6 +57,15 @@ def _ensure_existing_file(file_path: str | os.PathLike[str]) -> Path:
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(f"Audio file not found: {path}")
     return path
+
+
+def default_output_text_path(file_path: str | os.PathLike[str]) -> Path:
+    source_path = Path(file_path).expanduser()
+    if source_path.suffix:
+        output_base = source_path.with_suffix("")
+    else:
+        output_base = source_path
+    return output_base.with_suffix(".transcription.txt")
 
 
 def _import_imageio_ffmpeg():
@@ -150,21 +159,44 @@ def _probe_duration_seconds(file_path: str | os.PathLike[str]) -> float:
     if duration is None or duration <= 0:
         raise RuntimeError(
             f"Could not determine audio duration for '{path}'. "
-            "FFmpeg output was:\n{stderr_text}"
+            f"FFmpeg output was:\n{stderr_text}"
         )
     return float(duration)
 
 
 def _iter_chunk_specs(
-    total_duration_seconds: float, chunk_seconds: int
-) -> Iterable[tuple[int, float, float]]:
+    total_duration_seconds: float,
+    chunk_seconds: int,
+    overlap_seconds: int = DEFAULT_OVERLAP_SECONDS,
+) -> Iterable[tuple[int, float, float, float, float]]:
     if chunk_seconds <= 0:
         raise ValueError("chunk_seconds must be a positive integer")
-    total_chunks = max(1, math.ceil(total_duration_seconds / chunk_seconds))
-    for chunk_index in range(total_chunks):
-        start = chunk_index * chunk_seconds
-        end = min(total_duration_seconds, (chunk_index + 1) * chunk_seconds)
-        yield chunk_index, start, end
+    if overlap_seconds < 0:
+        raise ValueError("overlap_seconds must be zero or a positive integer")
+    if overlap_seconds >= chunk_seconds:
+        raise ValueError("overlap_seconds must be smaller than chunk_seconds")
+
+    stride_seconds = chunk_seconds - overlap_seconds
+    if total_duration_seconds <= 0:
+        raise ValueError("total_duration_seconds must be positive")
+
+    raw_specs: list[tuple[int, float, float]] = []
+    chunk_index = 0
+    start = 0.0
+    while True:
+        end = min(float(total_duration_seconds), start + float(chunk_seconds))
+        raw_specs.append((chunk_index, start, end))
+        if end >= total_duration_seconds:
+            break
+        chunk_index += 1
+        start += float(stride_seconds)
+
+    half_overlap = float(overlap_seconds) / 2.0
+    last_index = len(raw_specs) - 1
+    for chunk_index, start, end in raw_specs:
+        keep_start = start if chunk_index == 0 else min(end, start + half_overlap)
+        keep_end = end if chunk_index == last_index else max(start, end - half_overlap)
+        yield chunk_index, start, end, keep_start, keep_end
 
 
 def _export_audio_chunk(
@@ -268,9 +300,105 @@ def get_model(
     return download_model(model_name=model_name, progress_callback=progress_callback)
 
 
+def _normalized_compare_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    for raw_token in text.split():
+        normalized = re.sub(r"(^[^\w']+|[^\w']+$)", "", raw_token).casefold()
+        if normalized:
+            tokens.append(normalized)
+    return tokens
+
+
+def _remove_repeated_prefix(
+    previous_text: str, next_text: str, max_words: int = 12
+) -> str:
+    previous_words = previous_text.split()
+    next_words = next_text.split()
+    if not previous_words or not next_words:
+        return next_text.strip()
+
+    previous_normalized = _normalized_compare_tokens(previous_text)
+    next_normalized = _normalized_compare_tokens(next_text)
+    max_overlap = min(max_words, len(previous_normalized), len(next_normalized))
+    overlap_words = 0
+    for candidate in range(max_overlap, 0, -1):
+        if previous_normalized[-candidate:] == next_normalized[:candidate]:
+            overlap_words = candidate
+            break
+
+    if overlap_words <= 0:
+        return next_text.strip()
+    if overlap_words >= len(next_words):
+        return ""
+    return " ".join(next_words[overlap_words:]).strip()
+
+
 def _normalize_text_parts(text_parts: list[str]) -> str:
-    joined = "\n\n".join(part.strip() for part in text_parts if part.strip()).strip()
+    merged_parts: list[str] = []
+    for raw_part in text_parts:
+        part = raw_part.strip()
+        if not part:
+            continue
+        if not merged_parts:
+            merged_parts.append(part)
+            continue
+        deduplicated = _remove_repeated_prefix(merged_parts[-1], part)
+        if deduplicated:
+            merged_parts.append(deduplicated)
+
+    joined = " ".join(merged_parts).strip()
+    joined = re.sub(r"\s+([,.;:!?])", r"\1", joined)
     return joined + ("\n" if joined else "")
+
+
+def _segment_midpoint_seconds(segment: dict) -> float:
+    start = float(segment.get("start", 0.0))
+    end = float(segment.get("end", start))
+    if end < start:
+        end = start
+    return start + (end - start) / 2.0
+
+
+def _segment_in_keep_window(
+    segment: dict,
+    keep_start: float,
+    keep_end: float,
+    *,
+    is_last_chunk: bool,
+) -> bool:
+    midpoint = _segment_midpoint_seconds(segment)
+    if midpoint < keep_start:
+        return False
+    if is_last_chunk:
+        return midpoint <= keep_end
+    return midpoint < keep_end
+
+
+def _deduplicate_selected_segments(segments: list[dict]) -> list[dict]:
+    deduplicated: list[dict] = []
+    for segment in sorted(
+        segments,
+        key=lambda item: (
+            float(item.get("start", 0.0)),
+            float(item.get("end", 0.0)),
+        ),
+    ):
+        text = str(segment.get("text", "")).strip()
+        if not text:
+            continue
+        if deduplicated:
+            previous = deduplicated[-1]
+            same_text = _normalized_compare_tokens(text) == _normalized_compare_tokens(
+                str(previous.get("text", ""))
+            )
+            current_start = float(segment.get("start", 0.0))
+            previous_end = float(previous.get("end", 0.0))
+            if same_text and current_start <= previous_end + 0.25:
+                if float(segment.get("end", 0.0)) > previous_end:
+                    deduplicated[-1] = segment
+                continue
+        deduplicated.append(segment)
+    return deduplicated
 
 
 def transcribe_audio(
@@ -278,14 +406,15 @@ def transcribe_audio(
     output_path: str | os.PathLike[str] | None = None,
     model_name: str = DEFAULT_MODEL_NAME,
     chunk_seconds: int = DEFAULT_CHUNK_SECONDS,
+    overlap_seconds: int = DEFAULT_OVERLAP_SECONDS,
     progress_callback: ProgressCallback | None = None,
     language: str | None = None,
     task: str = "transcribe",
 ):
     source_path = _ensure_existing_file(file_path)
     if output_path is None:
-        output_base = source_path.with_suffix("")
-        output_text_path = output_base.with_suffix(".transcription.txt")
+        output_text_path = default_output_text_path(source_path)
+        output_base = output_text_path.with_suffix("")
     else:
         output_text_path = Path(output_path).expanduser().resolve()
         output_base = output_text_path.with_suffix("")
@@ -303,13 +432,19 @@ def transcribe_audio(
 
     model = download_model(model_name=model_name, progress_callback=progress_callback)
 
-    all_text_parts: list[str] = []
+    fallback_text_parts: list[str] = []
     all_segments: list[dict] = []
 
     with tempfile.TemporaryDirectory(prefix="localscribe_") as temp_dir:
-        chunk_specs = list(_iter_chunk_specs(total_duration, chunk_seconds))
+        chunk_specs = list(
+            _iter_chunk_specs(
+                total_duration_seconds=total_duration,
+                chunk_seconds=chunk_seconds,
+                overlap_seconds=overlap_seconds,
+            )
+        )
         total_chunks = len(chunk_specs)
-        for chunk_index, start, end in chunk_specs:
+        for chunk_index, start, end, keep_start, keep_end in chunk_specs:
             chunk_duration = end - start
             chunk_path = Path(temp_dir) / f"chunk_{chunk_index:05d}.wav"
             _emit_progress(
@@ -328,15 +463,26 @@ def transcribe_audio(
                 result = model.transcribe(str(chunk_path), language=language, task=task)
             except FileNotFoundError as exc:
                 raise _build_missing_ffmpeg_error(exc) from exc
-            chunk_text = result.get("text", "")
-            if chunk_text:
-                all_text_parts.append(chunk_text)
 
-            for segment in result.get("segments", []) or []:
+            chunk_text = str(result.get("text", "") or "")
+            raw_segments = result.get("segments", []) or []
+            selected_segments_for_chunk: list[dict] = []
+            for segment in raw_segments:
                 adjusted = dict(segment)
                 adjusted["start"] = float(adjusted.get("start", 0.0)) + start
                 adjusted["end"] = float(adjusted.get("end", 0.0)) + start
-                all_segments.append(adjusted)
+                if _segment_in_keep_window(
+                    adjusted,
+                    keep_start,
+                    keep_end,
+                    is_last_chunk=(chunk_index == total_chunks - 1),
+                ):
+                    selected_segments_for_chunk.append(adjusted)
+
+            if selected_segments_for_chunk:
+                all_segments.extend(selected_segments_for_chunk)
+            elif chunk_text.strip():
+                fallback_text_parts.append(chunk_text)
 
             _emit_progress(
                 progress_callback,
@@ -344,17 +490,26 @@ def transcribe_audio(
                 f"Finished chunk {chunk_index + 1}/{total_chunks}",
             )
 
-    full_text = _normalize_text_parts(all_text_parts)
+    all_segments = _deduplicate_selected_segments(all_segments)
+    if all_segments:
+        full_text = _normalize_text_parts(
+            [str(segment.get("text", "")) for segment in all_segments]
+        )
+    else:
+        full_text = _normalize_text_parts(fallback_text_parts)
+
     structured_result = {
         "source": str(source_path),
         "model_name": model_name,
         "chunk_seconds": chunk_seconds,
+        "overlap_seconds": overlap_seconds,
         "task": task,
         "language": language,
         "text": full_text,
         "segments": all_segments,
     }
 
+    output_text_path.parent.mkdir(parents=True, exist_ok=True)
     output_text_path.write_text(full_text, encoding="utf-8")
     output_json_path.write_text(
         json.dumps(structured_result, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -399,6 +554,12 @@ def parse_args(args: list[str]):
         type=int,
         default=DEFAULT_CHUNK_SECONDS,
         help="Chunk duration in seconds for chunked transcription",
+    )
+    parser.add_argument(
+        "--overlap-seconds",
+        type=int,
+        default=DEFAULT_OVERLAP_SECONDS,
+        help="Overlap in seconds between adjacent chunks",
     )
     parser.add_argument(
         "--language", default=None, help="Optional language hint passed to Whisper"
@@ -465,6 +626,7 @@ def main(args: list[str]):
         output_path=namespace.output_path,
         model_name=namespace.model_name,
         chunk_seconds=namespace.chunk_seconds,
+        overlap_seconds=namespace.overlap_seconds,
         progress_callback=progress_callback,
         language=namespace.language,
         task=namespace.task,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -28,9 +29,21 @@ def sample_audio(tmp_path):
     return audio_file
 
 
+def test_default_output_text_path(sample_audio):
+    assert (
+        skeleton.default_output_text_path(sample_audio).name
+        == "test_audio.transcription.txt"
+    )
+
+
 def test_parse_args_requires_file_path_when_not_downloading():
     with pytest.raises(SystemExit):
         skeleton.parse_args([])
+
+
+def test_parse_args_accepts_overlap_seconds(sample_audio):
+    args = skeleton.parse_args([str(sample_audio), "--overlap-seconds", "7"])
+    assert args.overlap_seconds == 7
 
 
 def test_main(sample_audio, monkeypatch, capsys, tmp_path):
@@ -42,6 +55,22 @@ def test_main(sample_audio, monkeypatch, capsys, tmp_path):
     rc = main([str(sample_audio)])
     capsys.readouterr()
     assert rc == 0
+
+
+def test_iter_chunk_specs_with_overlap():
+    specs = list(skeleton._iter_chunk_specs(25.0, chunk_seconds=10, overlap_seconds=2))
+    assert specs == [
+        (0, 0.0, 10.0, 0.0, 9.0),
+        (1, 8.0, 18.0, 9.0, 17.0),
+        (2, 16.0, 25.0, 17.0, 25.0),
+    ]
+
+
+def test_normalize_text_parts_removes_boundary_repetition():
+    merged = skeleton._normalize_text_parts(
+        ["hello there common words", "common words continue here"]
+    )
+    assert merged == "hello there common words continue here\n"
 
 
 def test_ensure_ffmpeg_on_path_uses_runtime_binary(monkeypatch, tmp_path):
@@ -135,3 +164,49 @@ def test_transcribe_wraps_whisper_missing_ffmpeg(sample_audio, monkeypatch, tmp_
 
     with pytest.raises(RuntimeError, match="Could not find FFmpeg"):
         skeleton.transcribe_audio(str(sample_audio), output_path=tmp_path / "out.txt")
+
+
+def test_transcribe_audio_uses_overlap_and_postprocesses_text(
+    sample_audio, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(skeleton, "_probe_duration_seconds", lambda _path: 12.0)
+    monkeypatch.setattr(skeleton, "_export_audio_chunk", lambda *args, **kwargs: None)
+
+    results = iter(
+        [
+            {
+                "text": "hello common words",
+                "segments": [
+                    {"start": 0.0, "end": 4.0, "text": "hello"},
+                    {"start": 8.0, "end": 9.4, "text": "common words"},
+                ],
+            },
+            {
+                "text": "common words continue here",
+                "segments": [
+                    {"start": 0.7, "end": 1.6, "text": "common words"},
+                    {"start": 2.0, "end": 4.0, "text": "continue here"},
+                ],
+            },
+        ]
+    )
+
+    model = SimpleNamespace(transcribe=lambda *args, **kwargs: next(results))
+    monkeypatch.setattr(skeleton, "download_model", lambda **kwargs: model)
+
+    result = skeleton.transcribe_audio(
+        str(sample_audio),
+        output_path=tmp_path / "custom" / "out.txt",
+        chunk_seconds=10,
+        overlap_seconds=2,
+    )
+
+    assert result["text"] == "hello common words continue here\n"
+    assert Path(result["output_text_path"]).name == "out.txt"
+    assert (tmp_path / "custom" / "out.txt").exists()
+    assert (tmp_path / "custom" / "out.transcription.json").exists()
+    assert (tmp_path / "custom" / "out.transcription.segments.txt").exists()
+
+    with open(result["output_segments_path"], "r", encoding="utf-8") as handle:
+        lines = [line.strip() for line in handle.readlines() if line.strip()]
+    assert len(lines) == 3
