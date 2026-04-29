@@ -127,7 +127,9 @@ def _decode_audio_to_mono(
                 and audio_stream.duration is not None
                 and audio_stream.time_base is not None
             ):
-                estimated_duration = float(audio_stream.duration * audio_stream.time_base)
+                estimated_duration = float(
+                    audio_stream.duration * audio_stream.time_base
+                )
 
             resampler = av.audio.resampler.AudioResampler(
                 format="fltp", layout="mono", rate=sample_rate
@@ -151,14 +153,19 @@ def _decode_audio_to_mono(
                     audio_parts.append(contiguous_part)
                     decoded_samples += int(contiguous_part.shape[-1])
 
-                if progress_callback is not None and estimated_duration and estimated_duration > 0:
+                if (
+                    progress_callback is not None
+                    and estimated_duration
+                    and estimated_duration > 0
+                ):
                     decoded_seconds = decoded_samples / float(sample_rate)
                     fraction = max(0.0, min(1.0, decoded_seconds / estimated_duration))
                     if fraction - last_fraction >= 0.02:
                         _emit_progress(
                             progress_callback,
                             0.02 + 0.03 * fraction,
-                            f"Decoding audio {decoded_seconds:.1f}/{estimated_duration:.1f} s",
+                            f"Decoding audio {decoded_seconds:.1f}"
+                            + f"/{estimated_duration:.1f} s",
                         )
                         last_fraction = fraction
 
@@ -435,7 +442,9 @@ def transcribe_audio(
     )
     _emit_progress(progress_callback, 0.02, f"Decoding audio from {source_path.name}")
     audio_samples, sample_rate = _decode_audio_to_mono(
-        source_path, sample_rate=WHISPER_SAMPLE_RATE, progress_callback=progress_callback
+        source_path,
+        sample_rate=WHISPER_SAMPLE_RATE,
+        progress_callback=progress_callback,
     )
     total_duration = audio_samples.shape[-1] / float(sample_rate)
     _emit_progress(

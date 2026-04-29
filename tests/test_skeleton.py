@@ -104,7 +104,9 @@ def test_decode_audio_to_mono_uses_av_resampler(sample_audio, monkeypatch):
 
     class FakeContainer:
         def __init__(self):
-            self.streams = [SimpleNamespace(type="audio", duration=16000, time_base=1 / 16000)]
+            self.streams = [
+                SimpleNamespace(type="audio", duration=16000, time_base=1 / 16000)
+            ]
 
         def decode(self, stream):
             yield object()
@@ -118,7 +120,9 @@ def test_decode_audio_to_mono_uses_av_resampler(sample_audio, monkeypatch):
     fake_av = SimpleNamespace(
         open=lambda path: FakeContainer(),
         audio=SimpleNamespace(
-            resampler=SimpleNamespace(AudioResampler=lambda **kwargs: FakeResampler(**kwargs))
+            resampler=SimpleNamespace(
+                AudioResampler=lambda **kwargs: FakeResampler(**kwargs)
+            )
         ),
     )
     monkeypatch.setattr(skeleton, "_import_av", lambda: fake_av)
@@ -203,7 +207,10 @@ def test_transcribe_audio_uses_overlap_and_postprocesses_text(
         overlap_seconds=2,
     )
 
-    assert transcribe_calls == [10 * skeleton.WHISPER_SAMPLE_RATE, 4 * skeleton.WHISPER_SAMPLE_RATE]
+    assert transcribe_calls == [
+        10 * skeleton.WHISPER_SAMPLE_RATE,
+        4 * skeleton.WHISPER_SAMPLE_RATE,
+    ]
     assert result["text"] == "hello common words continue here\n"
     assert Path(result["output_text_path"]).name == "out.txt"
     assert (tmp_path / "custom" / "out.txt").exists()
@@ -218,7 +225,9 @@ def test_transcribe_audio_uses_overlap_and_postprocesses_text(
 def test_packaged_model_dir_prefers_meipass(monkeypatch, tmp_path):
     bundled_models = tmp_path / "bundle" / "whisper_models"
     bundled_models.mkdir(parents=True)
-    monkeypatch.setattr(packaging.sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
+    monkeypatch.setattr(
+        packaging.sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False
+    )
     try:
         assert packaging.get_packaged_model_dir() == bundled_models.resolve()
     finally:
