@@ -1,9 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
-from localscribe.packaging import get_pyinstaller_binaries, get_pyinstaller_datas
+from localscribe.packaging import (
+    get_pyinstaller_binaries,
+    get_pyinstaller_datas,
+    get_pyinstaller_hiddenimports,
+)
 
 
 datas = get_pyinstaller_datas()
 binaries = get_pyinstaller_binaries()
+hiddenimports = get_pyinstaller_hiddenimports()
 
 
 a = Analysis(
@@ -11,7 +16,7 @@ a = Analysis(
     pathex=[],
     binaries=binaries,
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -24,8 +29,9 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
     name='localscribe-gui',
     debug=False,
     bootloader_ignore_signals=False,
@@ -37,14 +43,4 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name='localscribe-gui',
 )

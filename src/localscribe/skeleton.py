@@ -7,16 +7,16 @@ import os
 import re
 import socket
 import ssl
-import subprocess
 import sys
-import tempfile
 import wave
 from pathlib import Path
 from typing import Callable, Iterable
 from urllib.error import URLError
 
+import numpy as np
+
 from localscribe import __version__
-from localscribe.packaging import get_runtime_ffmpeg_binary, get_runtime_model_dir
+from localscribe.packaging import get_runtime_model_dir
 
 __author__ = "danibene"
 __copyright__ = "danibene"
@@ -28,12 +28,19 @@ ProgressCallback = Callable[[float, str], None]
 DEFAULT_MODEL_NAME = "base"
 DEFAULT_CHUNK_SECONDS = 60
 DEFAULT_OVERLAP_SECONDS = 5
+WHISPER_SAMPLE_RATE = 16000
 
 
 def _import_whisper():
     import whisper
 
     return whisper
+
+
+def _import_av():
+    import av
+
+    return av
 
 
 def _emit_progress(
@@ -68,63 +75,6 @@ def default_output_text_path(file_path: str | os.PathLike[str]) -> Path:
     return output_base.with_suffix(".transcription.txt")
 
 
-def _import_imageio_ffmpeg():
-    import imageio_ffmpeg
-
-    return imageio_ffmpeg
-
-
-def _ffmpeg_binary() -> str:
-    try:
-        return str(get_runtime_ffmpeg_binary())
-    except Exception:
-        override = os.environ.get("FFMPEG_BINARY")
-        if override:
-            return override
-        try:
-            imageio_ffmpeg = _import_imageio_ffmpeg()
-            return imageio_ffmpeg.get_ffmpeg_exe()
-        except Exception:
-            return "ffmpeg"
-
-
-def _ensure_ffmpeg_on_path() -> str:
-    ffmpeg_executable = _ffmpeg_binary()
-    ffmpeg_path = Path(ffmpeg_executable)
-    if ffmpeg_path.is_file():
-        ffmpeg_dir = str(ffmpeg_path.parent)
-        current_path = os.environ.get("PATH", "")
-        path_parts = current_path.split(os.pathsep) if current_path else []
-        if ffmpeg_dir not in path_parts:
-            os.environ["PATH"] = ffmpeg_dir + (
-                os.pathsep + current_path if current_path else ""
-            )
-    return ffmpeg_executable
-
-
-def _build_missing_ffmpeg_error(exc: FileNotFoundError) -> RuntimeError:
-    attempted = _ffmpeg_binary()
-    message = (
-        "Could not find FFmpeg. LocalScribe needs FFmpeg to measure audio duration,"
-        " export chunks, and let Whisper decode chunk audio during transcription. "
-        f"It tried to use '{attempted}'. Install imageio-ffmpeg correctly,"
-        " bundle FFmpeg with the app, "
-        "or set the FFMPEG_BINARY environment variable to a valid ffmpeg executable. "
-        f"Original error: {exc}"
-    )
-    return RuntimeError(message)
-
-
-def _parse_ffmpeg_duration_seconds(stderr_text: str) -> float | None:
-    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", stderr_text)
-    if not match:
-        return None
-    hours = int(match.group(1))
-    minutes = int(match.group(2))
-    seconds = float(match.group(3))
-    return hours * 3600 + minutes * 60 + seconds
-
-
 def _probe_duration_with_wave(path: Path) -> float | None:
     if path.suffix.lower() != ".wav":
         return None
@@ -139,29 +89,102 @@ def _probe_duration_with_wave(path: Path) -> float | None:
     return frame_count / float(frame_rate)
 
 
-def _probe_duration_seconds(file_path: str | os.PathLike[str]) -> float:
-    path = _ensure_existing_file(file_path)
+def _extract_audio_samples(frame) -> np.ndarray:
+    array = frame.to_ndarray()
+    audio = np.asarray(array, dtype=np.float32)
+    if audio.ndim == 0:
+        return audio.reshape(1)
+    if audio.ndim == 1:
+        return audio
+    if audio.shape[0] == 1:
+        return audio[0]
+    return audio.mean(axis=0)
 
-    wave_duration = _probe_duration_with_wave(path)
-    if wave_duration is not None:
-        if wave_duration <= 0:
-            raise ValueError(f"Invalid audio duration for {path}: {wave_duration}")
-        return float(wave_duration)
 
-    command = [_ensure_ffmpeg_on_path(), "-hide_banner", "-i", str(path)]
+def _decode_audio_to_mono(
+    file_path: str | os.PathLike[str],
+    *,
+    sample_rate: int = WHISPER_SAMPLE_RATE,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[np.ndarray, int]:
+    source_path = _ensure_existing_file(file_path)
+
+    wave_duration = _probe_duration_with_wave(source_path)
+    estimated_duration = wave_duration
+
+    av = _import_av()
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    except FileNotFoundError as exc:
-        raise _build_missing_ffmpeg_error(exc) from exc
+        with av.open(str(source_path)) as container:
+            audio_stream = next(
+                (stream for stream in container.streams if stream.type == "audio"),
+                None,
+            )
+            if audio_stream is None:
+                raise RuntimeError(f"No audio stream found in '{source_path}'.")
 
-    stderr_text = completed.stderr or completed.stdout or ""
-    duration = _parse_ffmpeg_duration_seconds(stderr_text)
-    if duration is None or duration <= 0:
+            if (
+                estimated_duration is None
+                and audio_stream.duration is not None
+                and audio_stream.time_base is not None
+            ):
+                estimated_duration = float(audio_stream.duration * audio_stream.time_base)
+
+            resampler = av.audio.resampler.AudioResampler(
+                format="fltp", layout="mono", rate=sample_rate
+            )
+            audio_parts: list[np.ndarray] = []
+            decoded_samples = 0
+            last_fraction = -1.0
+
+            for frame in container.decode(audio_stream):
+                resampled_frames = resampler.resample(frame)
+                if resampled_frames is None:
+                    continue
+                if not isinstance(resampled_frames, list):
+                    resampled_frames = [resampled_frames]
+
+                for resampled_frame in resampled_frames:
+                    audio_part = _extract_audio_samples(resampled_frame)
+                    if audio_part.size == 0:
+                        continue
+                    contiguous_part = np.ascontiguousarray(audio_part, dtype=np.float32)
+                    audio_parts.append(contiguous_part)
+                    decoded_samples += int(contiguous_part.shape[-1])
+
+                if progress_callback is not None and estimated_duration and estimated_duration > 0:
+                    decoded_seconds = decoded_samples / float(sample_rate)
+                    fraction = max(0.0, min(1.0, decoded_seconds / estimated_duration))
+                    if fraction - last_fraction >= 0.02:
+                        _emit_progress(
+                            progress_callback,
+                            0.02 + 0.03 * fraction,
+                            f"Decoding audio {decoded_seconds:.1f}/{estimated_duration:.1f} s",
+                        )
+                        last_fraction = fraction
+
+            flushed_frames = resampler.resample(None)
+            if flushed_frames is not None:
+                if not isinstance(flushed_frames, list):
+                    flushed_frames = [flushed_frames]
+                for flushed_frame in flushed_frames:
+                    audio_part = _extract_audio_samples(flushed_frame)
+                    if audio_part.size == 0:
+                        continue
+                    contiguous_part = np.ascontiguousarray(audio_part, dtype=np.float32)
+                    audio_parts.append(contiguous_part)
+                    decoded_samples += int(contiguous_part.shape[-1])
+    except FileNotFoundError:
+        raise
+    except Exception as exc:
         raise RuntimeError(
-            f"Could not determine audio duration for '{path}'. "
-            f"FFmpeg output was:\n{stderr_text}"
-        )
-    return float(duration)
+            f"Could not decode audio from '{source_path}'. Original error: {exc}"
+        ) from exc
+
+    if not audio_parts:
+        raise RuntimeError(f"Could not decode any audio samples from '{source_path}'.")
+
+    full_audio = np.ascontiguousarray(np.concatenate(audio_parts), dtype=np.float32)
+    return full_audio, sample_rate
 
 
 def _iter_chunk_specs(
@@ -197,32 +220,6 @@ def _iter_chunk_specs(
         keep_start = start if chunk_index == 0 else min(end, start + half_overlap)
         keep_end = end if chunk_index == last_index else max(start, end - half_overlap)
         yield chunk_index, start, end, keep_start, keep_end
-
-
-def _export_audio_chunk(
-    input_path: str | os.PathLike[str],
-    output_path: str | os.PathLike[str],
-    start_seconds: float,
-    duration_seconds: float,
-) -> None:
-    command = [
-        _ensure_ffmpeg_on_path(),
-        "-y",
-        "-ss",
-        f"{start_seconds:.3f}",
-        "-i",
-        str(input_path),
-        "-t",
-        f"{duration_seconds:.3f}",
-        "-vn",
-        "-acodec",
-        "pcm_s16le",
-        str(output_path),
-    ]
-    try:
-        subprocess.run(command, capture_output=True, text=True, check=True)
-    except FileNotFoundError as exc:
-        raise _build_missing_ffmpeg_error(exc) from exc
 
 
 def _model_filename(model_name: str) -> str:
@@ -266,7 +263,6 @@ def download_model(
     model_name: str = DEFAULT_MODEL_NAME,
     progress_callback: ProgressCallback | None = None,
 ):
-    _ensure_ffmpeg_on_path()
     model_dir = get_runtime_model_dir()
     model_file = model_dir / _model_filename(model_name)
     if model_file.exists():
@@ -401,6 +397,18 @@ def _deduplicate_selected_segments(segments: list[dict]) -> list[dict]:
     return deduplicated
 
 
+def _slice_audio_chunk(
+    audio_samples: np.ndarray,
+    *,
+    sample_rate: int,
+    start_seconds: float,
+    end_seconds: float,
+) -> np.ndarray:
+    start_index = max(0, int(round(start_seconds * sample_rate)))
+    end_index = max(start_index, int(round(end_seconds * sample_rate)))
+    return np.ascontiguousarray(audio_samples[start_index:end_index], dtype=np.float32)
+
+
 def transcribe_audio(
     file_path: str | os.PathLike[str],
     output_path: str | os.PathLike[str] | None = None,
@@ -425,7 +433,11 @@ def transcribe_audio(
     _emit_progress(
         progress_callback, 0.0, f"Preparing transcription for {source_path.name}"
     )
-    total_duration = _probe_duration_seconds(source_path)
+    _emit_progress(progress_callback, 0.02, f"Decoding audio from {source_path.name}")
+    audio_samples, sample_rate = _decode_audio_to_mono(
+        source_path, sample_rate=WHISPER_SAMPLE_RATE, progress_callback=progress_callback
+    )
+    total_duration = audio_samples.shape[-1] / float(sample_rate)
     _emit_progress(
         progress_callback, 0.05, f"Audio duration: {total_duration:.1f} seconds"
     )
@@ -434,61 +446,57 @@ def transcribe_audio(
 
     fallback_text_parts: list[str] = []
     all_segments: list[dict] = []
-
-    with tempfile.TemporaryDirectory(prefix="localscribe_") as temp_dir:
-        chunk_specs = list(
-            _iter_chunk_specs(
-                total_duration_seconds=total_duration,
-                chunk_seconds=chunk_seconds,
-                overlap_seconds=overlap_seconds,
-            )
+    chunk_specs = list(
+        _iter_chunk_specs(
+            total_duration_seconds=total_duration,
+            chunk_seconds=chunk_seconds,
+            overlap_seconds=overlap_seconds,
         )
-        total_chunks = len(chunk_specs)
-        for chunk_index, start, end, keep_start, keep_end in chunk_specs:
-            chunk_duration = end - start
-            chunk_path = Path(temp_dir) / f"chunk_{chunk_index:05d}.wav"
-            _emit_progress(
-                progress_callback,
-                0.10 + 0.80 * (chunk_index / max(1, total_chunks)),
-                f"Exporting chunk {chunk_index + 1}/{total_chunks}",
-            )
-            _export_audio_chunk(source_path, chunk_path, start, chunk_duration)
+    )
+    total_chunks = len(chunk_specs)
 
-            _emit_progress(
-                progress_callback,
-                0.10 + 0.80 * (chunk_index / max(1, total_chunks)),
-                f"Transcribing chunk {chunk_index + 1}/{total_chunks}",
-            )
-            try:
-                result = model.transcribe(str(chunk_path), language=language, task=task)
-            except FileNotFoundError as exc:
-                raise _build_missing_ffmpeg_error(exc) from exc
+    for chunk_index, start, end, keep_start, keep_end in chunk_specs:
+        _emit_progress(
+            progress_callback,
+            0.10 + 0.80 * (chunk_index / max(1, total_chunks)),
+            f"Transcribing chunk {chunk_index + 1}/{total_chunks}",
+        )
+        chunk_audio = _slice_audio_chunk(
+            audio_samples,
+            sample_rate=sample_rate,
+            start_seconds=start,
+            end_seconds=end,
+        )
+        if chunk_audio.size == 0:
+            continue
 
-            chunk_text = str(result.get("text", "") or "")
-            raw_segments = result.get("segments", []) or []
-            selected_segments_for_chunk: list[dict] = []
-            for segment in raw_segments:
-                adjusted = dict(segment)
-                adjusted["start"] = float(adjusted.get("start", 0.0)) + start
-                adjusted["end"] = float(adjusted.get("end", 0.0)) + start
-                if _segment_in_keep_window(
-                    adjusted,
-                    keep_start,
-                    keep_end,
-                    is_last_chunk=(chunk_index == total_chunks - 1),
-                ):
-                    selected_segments_for_chunk.append(adjusted)
+        result = model.transcribe(chunk_audio, language=language, task=task)
 
-            if selected_segments_for_chunk:
-                all_segments.extend(selected_segments_for_chunk)
-            elif chunk_text.strip():
-                fallback_text_parts.append(chunk_text)
+        chunk_text = str(result.get("text", "") or "")
+        raw_segments = result.get("segments", []) or []
+        selected_segments_for_chunk: list[dict] = []
+        for segment in raw_segments:
+            adjusted = dict(segment)
+            adjusted["start"] = float(adjusted.get("start", 0.0)) + start
+            adjusted["end"] = float(adjusted.get("end", 0.0)) + start
+            if _segment_in_keep_window(
+                adjusted,
+                keep_start,
+                keep_end,
+                is_last_chunk=(chunk_index == total_chunks - 1),
+            ):
+                selected_segments_for_chunk.append(adjusted)
 
-            _emit_progress(
-                progress_callback,
-                0.10 + 0.80 * ((chunk_index + 1) / max(1, total_chunks)),
-                f"Finished chunk {chunk_index + 1}/{total_chunks}",
-            )
+        if selected_segments_for_chunk:
+            all_segments.extend(selected_segments_for_chunk)
+        elif chunk_text.strip():
+            fallback_text_parts.append(chunk_text)
+
+        _emit_progress(
+            progress_callback,
+            0.10 + 0.80 * ((chunk_index + 1) / max(1, total_chunks)),
+            f"Finished chunk {chunk_index + 1}/{total_chunks}",
+        )
 
     all_segments = _deduplicate_selected_segments(all_segments)
     if all_segments:
@@ -505,6 +513,7 @@ def transcribe_audio(
         "overlap_seconds": overlap_seconds,
         "task": task,
         "language": language,
+        "sample_rate": sample_rate,
         "text": full_text,
         "segments": all_segments,
     }

@@ -133,10 +133,6 @@ jobs:
           ${{ steps.venv-python.outputs.path }} -m pip install --upgrade pip &&
           ${{ steps.venv-python.outputs.path }} -m pip install -e . pyinstaller
 
-      - name: Verify FFmpeg is available for bundling
-        run: >-
-          ${{ steps.venv-python.outputs.path }} -c "from localscribe.packaging import get_source_ffmpeg_binary; print(get_source_ffmpeg_binary())"
-
       - name: Preload Whisper model cache
         run: >-
           ${{ steps.venv-python.outputs.path }} -m localscribe.skeleton

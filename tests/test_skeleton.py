@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import os
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import localscribe.packaging as packaging
@@ -73,64 +72,77 @@ def test_normalize_text_parts_removes_boundary_repetition():
     assert merged == "hello there common words continue here\n"
 
 
-def test_ensure_ffmpeg_on_path_uses_runtime_binary(monkeypatch, tmp_path):
-    ffmpeg_dir = tmp_path / "ffmpeg"
-    ffmpeg_dir.mkdir()
-    ffmpeg_binary = ffmpeg_dir / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
-    ffmpeg_binary.write_text("stub", encoding="utf-8")
-
-    monkeypatch.setattr(skeleton, "_ffmpeg_binary", lambda: str(ffmpeg_binary))
-    monkeypatch.setenv("PATH", "")
-
-    resolved = skeleton._ensure_ffmpeg_on_path()
-
-    assert resolved == str(ffmpeg_binary)
-    path_parts = os.environ["PATH"].split(os.pathsep)
-    assert str(ffmpeg_dir) == path_parts[0]
+def test_slice_audio_chunk_returns_expected_samples():
+    audio = np.arange(0, 16000 * 3, dtype=np.float32)
+    sliced = skeleton._slice_audio_chunk(
+        audio,
+        sample_rate=16000,
+        start_seconds=0.5,
+        end_seconds=1.5,
+    )
+    assert sliced.shape == (16000,)
+    assert sliced[0] == pytest.approx(8000.0)
+    assert sliced[-1] == pytest.approx(23999.0)
 
 
-def test_build_missing_ffmpeg_error_mentions_attempted_binary(monkeypatch):
-    monkeypatch.setattr(skeleton, "_ffmpeg_binary", lambda: "C:/bundle/ffmpeg.exe")
-    error = skeleton._build_missing_ffmpeg_error(FileNotFoundError("missing"))
-    text = str(error)
-    assert "C:/bundle/ffmpeg.exe" in text
-    assert "Whisper decode" in text or "Whisper decode chunk audio" in text
+def test_decode_audio_to_mono_uses_av_resampler(sample_audio, monkeypatch):
+    class FakeResampledFrame:
+        def __init__(self, values):
+            self._values = np.asarray(values, dtype=np.float32)
+
+        def to_ndarray(self):
+            return self._values
+
+    class FakeResampler:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def resample(self, frame):
+            if frame is None:
+                return []
+            return [FakeResampledFrame([[0.1, 0.2, 0.3]])]
+
+    class FakeContainer:
+        def __init__(self):
+            self.streams = [SimpleNamespace(type="audio", duration=16000, time_base=1 / 16000)]
+
+        def decode(self, stream):
+            yield object()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    fake_av = SimpleNamespace(
+        open=lambda path: FakeContainer(),
+        audio=SimpleNamespace(
+            resampler=SimpleNamespace(AudioResampler=lambda **kwargs: FakeResampler(**kwargs))
+        ),
+    )
+    monkeypatch.setattr(skeleton, "_import_av", lambda: fake_av)
+
+    audio, rate = skeleton._decode_audio_to_mono(sample_audio)
+
+    assert rate == 16000
+    assert np.allclose(audio, np.array([0.1, 0.2, 0.3], dtype=np.float32))
 
 
-def test_get_packaged_ffmpeg_binary_prefers_meipass(monkeypatch, tmp_path):
-    source_ffmpeg = tmp_path / "source" / "ffmpeg.exe"
-    source_ffmpeg.parent.mkdir(parents=True)
-    source_ffmpeg.write_text("stub", encoding="utf-8")
-    bundled_ffmpeg = tmp_path / "bundle" / "ffmpeg" / "ffmpeg.exe"
-    bundled_ffmpeg.parent.mkdir(parents=True)
-    bundled_ffmpeg.write_text("stub", encoding="utf-8")
-
-    monkeypatch.setattr(packaging, "get_source_ffmpeg_binary", lambda: source_ffmpeg)
-    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
-
-    try:
-        assert packaging.get_packaged_ffmpeg_binary() == bundled_ffmpeg.resolve()
-    finally:
-        if hasattr(sys, "_MEIPASS"):
-            monkeypatch.delattr(sys, "_MEIPASS", raising=False)
+@pytest.mark.parametrize(
+    ("raw_text", "expected_tokens"),
+    [
+        ("Hello, world!", ["hello", "world"]),
+        ("Don't stop", ["don't", "stop"]),
+    ],
+)
+def test_normalized_compare_tokens(raw_text, expected_tokens):
+    assert skeleton._normalized_compare_tokens(raw_text) == expected_tokens
 
 
-def test_get_pyinstaller_binaries_uses_source_ffmpeg(monkeypatch, tmp_path):
-    ffmpeg_binary = tmp_path / "ffmpeg.exe"
-    ffmpeg_binary.write_text("stub", encoding="utf-8")
-    monkeypatch.setattr(packaging, "get_source_ffmpeg_binary", lambda: ffmpeg_binary)
-
-    assert packaging.get_pyinstaller_binaries() == [(str(ffmpeg_binary), "ffmpeg")]
-
-
-def test_download_model_adds_ffmpeg_to_path(monkeypatch, tmp_path):
-    ffmpeg_dir = tmp_path / "ffmpeg"
-    ffmpeg_dir.mkdir()
-    ffmpeg_binary = ffmpeg_dir / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
-    ffmpeg_binary.write_text("stub", encoding="utf-8")
-
-    monkeypatch.setattr(skeleton, "_ffmpeg_binary", lambda: str(ffmpeg_binary))
-    monkeypatch.setattr(skeleton, "get_runtime_model_dir", lambda: tmp_path / "models")
+def test_download_model_uses_runtime_model_dir(monkeypatch, tmp_path):
+    model_dir = tmp_path / "models"
+    monkeypatch.setattr(skeleton, "get_runtime_model_dir", lambda: model_dir)
 
     load_calls = []
 
@@ -141,37 +153,23 @@ def test_download_model_adds_ffmpeg_to_path(monkeypatch, tmp_path):
     monkeypatch.setattr(
         skeleton, "_import_whisper", lambda: SimpleNamespace(load_model=fake_load_model)
     )
-    monkeypatch.setenv("PATH", "")
 
     skeleton.download_model(model_name="base")
 
-    assert load_calls == [("base", str((tmp_path / "models")))]
-    assert str(ffmpeg_dir) in os.environ["PATH"].split(os.pathsep)
-
-
-def test_transcribe_wraps_whisper_missing_ffmpeg(sample_audio, monkeypatch, tmp_path):
-    monkeypatch.setattr(skeleton, "_probe_duration_seconds", lambda _path: 1.0)
-    monkeypatch.setattr(skeleton, "_export_audio_chunk", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        skeleton,
-        "download_model",
-        lambda **kwargs: SimpleNamespace(
-            transcribe=lambda *a, **k: (_ for _ in ()).throw(
-                FileNotFoundError("ffmpeg missing")
-            )
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="Could not find FFmpeg"):
-        skeleton.transcribe_audio(str(sample_audio), output_path=tmp_path / "out.txt")
+    assert load_calls == [("base", str(model_dir))]
 
 
 def test_transcribe_audio_uses_overlap_and_postprocesses_text(
     sample_audio, monkeypatch, tmp_path
 ):
-    monkeypatch.setattr(skeleton, "_probe_duration_seconds", lambda _path: 12.0)
-    monkeypatch.setattr(skeleton, "_export_audio_chunk", lambda *args, **kwargs: None)
+    audio = np.zeros(12 * skeleton.WHISPER_SAMPLE_RATE, dtype=np.float32)
+    monkeypatch.setattr(
+        skeleton,
+        "_decode_audio_to_mono",
+        lambda *args, **kwargs: (audio, skeleton.WHISPER_SAMPLE_RATE),
+    )
 
+    transcribe_calls = []
     results = iter(
         [
             {
@@ -191,7 +189,11 @@ def test_transcribe_audio_uses_overlap_and_postprocesses_text(
         ]
     )
 
-    model = SimpleNamespace(transcribe=lambda *args, **kwargs: next(results))
+    def fake_transcribe(chunk_audio, **kwargs):
+        transcribe_calls.append(chunk_audio.shape[0])
+        return next(results)
+
+    model = SimpleNamespace(transcribe=fake_transcribe)
     monkeypatch.setattr(skeleton, "download_model", lambda **kwargs: model)
 
     result = skeleton.transcribe_audio(
@@ -201,6 +203,7 @@ def test_transcribe_audio_uses_overlap_and_postprocesses_text(
         overlap_seconds=2,
     )
 
+    assert transcribe_calls == [10 * skeleton.WHISPER_SAMPLE_RATE, 4 * skeleton.WHISPER_SAMPLE_RATE]
     assert result["text"] == "hello common words continue here\n"
     assert Path(result["output_text_path"]).name == "out.txt"
     assert (tmp_path / "custom" / "out.txt").exists()
@@ -210,3 +213,13 @@ def test_transcribe_audio_uses_overlap_and_postprocesses_text(
     with open(result["output_segments_path"], "r", encoding="utf-8") as handle:
         lines = [line.strip() for line in handle.readlines() if line.strip()]
     assert len(lines) == 3
+
+
+def test_packaged_model_dir_prefers_meipass(monkeypatch, tmp_path):
+    bundled_models = tmp_path / "bundle" / "whisper_models"
+    bundled_models.mkdir(parents=True)
+    monkeypatch.setattr(packaging.sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
+    try:
+        assert packaging.get_packaged_model_dir() == bundled_models.resolve()
+    finally:
+        monkeypatch.delattr(packaging.sys, "_MEIPASS", raising=False)
