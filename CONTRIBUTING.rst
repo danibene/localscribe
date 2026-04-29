@@ -173,9 +173,9 @@ Run code checks
    To install the pre-commit hooks, run::
 
     pre-commit install
-   
+
    To run the checks manually, use::
-   
+
     pre-commit run --all-files
 
    If you can't resolve the issues, you can skip the pre-commit checks by
